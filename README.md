@@ -11,14 +11,71 @@
 
 | 폴더/파일 | 설명 | 입력 | 출력 |
 |---|---|---|---|
-| `screener_brief.py` | 익절 스크리너 (MA10 + RVOL 신호) | FDR | `outputs/` |
-| `canaria/risk_scoring_model.py` | 카나리아 리스크 스코어 (13개 시그널 → 국면) | yfinance + FRED | `outputs/canaria/날짜/` |
+| `start_brief.py` | 익절 스크리너 (MA10 + RVOL 신호) | FDR | `outputs/` |
+| `canaria.py` | 카나리아 리스크 스코어 (13개 시그널 → 국면) | yfinance + FRED | `outputs/canaria/날짜/` |
 | `ciss/` | CISS 시스템적 스트레스 지표 (ECB식 5개 섹터) | ECOS + FRED + yfinance | `outputs/ciss/` |
 | `post_ipo/` | 2년 이내 신규상장 모니터링 | `data/수급.xlsx`, 유니버스 엑셀 | `outputs/post_ipo/` |
 | `whole_stock/` | 전종목 수급 스코어링 (update→stack 누적) | `전종목_수급.xlsx` | `outputs/whole_stock/` |
 | `under_20w/` | 20주선 하회 종목 스크리닝 | `all_stock.xlsx` | `outputs/under_20w/` |
 
 공통: 루트의 `env_loader.py`(의존성 없는 .env 로더), `.env`(API 키, 깃 제외).
+
+---
+
+## 폴더 구조
+
+저장소에 실제로 올라간 구조 (캐시·출력물·.env 제외).
+입력 Excel은 매일 단말에서 받아 해당 위치에 갱신, 출력은 `outputs/<프로젝트>/` 로 생성됨.
+
+```
+igis/
+├── README.md
+├── requirements.txt
+├── .gitignore
+├── .env.example              # 키 견본 (.env 는 깃 제외)
+├── env_loader.py             # 공통 .env 로더
+│
+├── start_brief.py            # ① 익절 스크리너 (단일 파일)
+├── canaria.py                # ② 카나리아 리스크 (단일 파일)
+│
+├── ciss/                     # ③ CISS 시스템적 스트레스 지표
+│   ├── main.py               #    실행 엔트리
+│   ├── data_loader_v2.py     #    ECOS/FRED/yfinance 13개 series 로드
+│   ├── transforms.py         #    15개 지표 변환 + ECDF
+│   ├── dcc_garch.py          #    EWMA 상관
+│   └── ciss_calculator.py    #    CISS 합성
+│
+├── post_ipo/                 # ④ 2년 이내 신규상장 모니터링
+│   ├── run.py                #    실행 엔트리 (기본 버전 B, --a 로 A)
+│   ├── screen_ipo.py         #    IPOMonitor 스코어링
+│   ├── post_ipo_daily/
+│   │   ├── __init__.py
+│   │   ├── config.py         #    경로/설정
+│   │   └── utils.py
+│   └── data/                 # ← 입력 Excel (매일 갱신)
+│       ├── 수급.xlsx          #    단말 수급 (Refresh 후 저장)
+│       └── __post ipo univ_*.xlsx   # 유니버스 (상장일자 포함)
+│
+├── whole_stock/              # ⑤ 전종목 수급 스코어링
+│   ├── whole_stock.py        #    실행 엔트리 (update→stack 누적)
+│   ├── fill_data.py          #    거래일 공백 보강
+│   ├── 전종목_수급.xlsx        # ← 입력 (update 시트 Refresh 후, 엑셀 닫고 실행)
+│   └── fill_data.xlsx        #    공백 보강용 (시트명 = YYYYMMDD)
+│
+├── under_20w/                # ⑥ 20주선 하회 스크리닝
+│   ├── under_20w.py          #    실행 엔트리
+│   ├── all_stock.xlsx        # ← 입력 (단말, 시가총액 억원 단위)
+│   └── database/fdr_cache/   #    FDR 가격 캐시 (깃 제외, 자동 생성)
+│
+└── outputs/                  # 모든 출력물 (자동 생성)
+    ├── canaria/<날짜>/
+    ├── ciss/
+    ├── post_ipo/
+    ├── whole_stock/
+    └── under_20w/
+```
+
+> 입력 표시(`←`)가 붙은 Excel만 2팀이 직접 갱신하면 됩니다. 나머지는 코드가 생성/관리.
 
 ---
 
@@ -53,15 +110,15 @@ copy .env.example .env
 cp .env.example .env
 ```
 그 후 `.env` 를 열어 ECOS_API_KEY, FRED_API_KEY 에 실제 값 입력.
-(screener_brief, post_ipo, whole_stock, under_20w 는 FDR 무료라 키 불필요)
+(start_brief, post_ipo, whole_stock, under_20w 는 FDR 무료라 키 불필요)
 
 ### 5. 실행 예시
 ```bash
 # 익절 스크리너
-py -3.12 screener_brief.py
+py -3.12 start_brief.py
 
 # 카나리아 리스크
-py -3.12 canaria/risk_scoring_model.py
+py -3.12 canaria.py
 
 # CISS
 cd ciss && py -3.12 main.py
