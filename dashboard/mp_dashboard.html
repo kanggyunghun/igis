@@ -1,0 +1,2172 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>2팀 MP 관리 대시보드</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --line: #d8dee8;
+      --line-strong: #aab6c6;
+      --text: #1d2733;
+      --muted: #687589;
+      --head: #143a5a;
+      --head-2: #1f6f8f;
+      --ok: #0f7b59;
+      --warn: #a45b00;
+      --bad: #b3261e;
+      --soft-ok: #e5f3ed;
+      --soft-warn: #fff2d8;
+      --soft-bad: #fde7e4;
+      --edit: #fff8d7;
+      --shadow: 0 1px 2px rgba(20, 34, 52, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Pretendard Variable", "Pretendard", -apple-system, BlinkMacSystemFont,
+        system-ui, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic",
+        "Segoe UI", Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
+      font-feature-settings: "tnum" 1;
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .topbar {
+      max-width: 1680px;
+      margin: 0 auto;
+      padding: 14px 18px 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .title-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: 0;
+      font-weight: 700;
+      color: var(--head);
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .toolbar-divider {
+      width: 1px;
+      height: 22px;
+      background: var(--line);
+      margin: 0 2px;
+    }
+
+    .filter-chips {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      flex: 1 1 auto;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 2px 8px;
+      height: 22px;
+      border-radius: 999px;
+      background: #e8f1f7;
+      color: var(--head);
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid #c4d8e6;
+    }
+
+    .chip button {
+      all: unset;
+      cursor: pointer;
+      font-weight: 800;
+      color: var(--head-2);
+      padding: 0 2px;
+      line-height: 1;
+    }
+
+    .chip button:hover {
+      color: var(--bad);
+    }
+
+    button,
+    select,
+    input {
+      font: inherit;
+      border: 1px solid var(--line-strong);
+      background: #fff;
+      color: var(--text);
+      height: 32px;
+      border-radius: 6px;
+    }
+
+    button {
+      padding: 0 11px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    button.primary {
+      background: var(--head-2);
+      border-color: var(--head-2);
+      color: #fff;
+    }
+
+    button.danger {
+      color: var(--bad);
+      border-color: #e0aaa5;
+      background: #fff;
+    }
+
+    input,
+    select {
+      padding: 0 9px;
+    }
+
+    #searchInput {
+      width: min(280px, 100%);
+    }
+
+    #fundSelect,
+    #sectorFundSelect {
+      min-width: 116px;
+    }
+
+    #sectorSelect,
+    #detailSelect {
+      min-width: 140px;
+      max-width: 200px;
+    }
+
+    main {
+      max-width: 1680px;
+      margin: 0 auto;
+      padding: 16px 18px 28px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(130px, 1fr));
+      gap: 10px;
+    }
+
+    .metric,
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .metric {
+      padding: 11px 12px;
+      min-height: 70px;
+    }
+
+    .metric .label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+
+    .metric .value {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--head);
+    }
+
+    .metric.bad .value {
+      color: var(--bad);
+    }
+
+    .metric.warn .value {
+      color: var(--warn);
+    }
+
+    .panel {
+      overflow: hidden;
+    }
+
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      background: #eef3f8;
+      border-bottom: 1px solid var(--line);
+      color: var(--head);
+      font-weight: 700;
+      min-height: 50px;
+      box-sizing: border-box;
+    }
+
+    .panel-body {
+      padding: 10px 12px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(360px, 0.8fr);
+      gap: 14px;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 14px;
+      align-items: stretch;
+    }
+
+    .workspace > section.panel {
+      display: flex;
+      flex-direction: column;
+      max-height: calc(100vh - 130px);
+      min-height: 0;
+    }
+
+    .sector-panel {
+      position: sticky;
+      top: 112px;
+      max-height: calc(100vh - 130px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .sector-panel .panel-body {
+      padding: 8px 8px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 0;
+    }
+
+    .sector-nav {
+      display: grid;
+      gap: 4px;
+      overflow: auto;
+      max-height: 42vh;
+      padding-right: 4px;
+    }
+
+    .sector-button {
+      width: 100%;
+      text-align: left;
+      padding: 9px 11px;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 6px;
+      display: grid;
+      gap: 3px;
+      cursor: pointer;
+      height: auto;
+    }
+
+    .sector-button:hover {
+      border-color: var(--head-2);
+      background: #f4faff;
+    }
+
+    .sector-button.active {
+      border-color: var(--head-2);
+      background: #e8f4f8;
+      box-shadow: inset 3px 0 0 var(--head-2);
+    }
+
+    .sector-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+    }
+
+    .sector-name {
+      font-weight: 700;
+      color: var(--head);
+      font-size: 13.5px;
+    }
+
+    .sector-target {
+      font-weight: 700;
+      color: var(--text);
+      font-size: 13.5px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .sector-count {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .sector-gap {
+      font-size: 11.5px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .sector-stock-box {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fafbfd;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .sector-stock-head {
+      padding: 7px 10px;
+      font-weight: 700;
+      color: var(--head);
+      font-size: 12px;
+      background: #eef3f8;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .sector-stock-list {
+      margin: 0;
+      padding: 6px;
+      list-style: none;
+      display: grid;
+      gap: 4px;
+      overflow: auto;
+      max-height: 32vh;
+    }
+
+    .sector-stock-list li {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 8px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      font-size: 12px;
+    }
+
+    .sector-stock-list .stock-name {
+      font-weight: 600;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .sector-stock-list .stock-meta {
+      font-variant-numeric: tabular-nums;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .fund-tabs {
+      display: inline-flex;
+      gap: 0;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      overflow: hidden;
+      background: #fff;
+    }
+
+    .fund-tab {
+      all: unset;
+      cursor: pointer;
+      padding: 4px 12px;
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--muted);
+      border-right: 1px solid var(--line);
+      transition: all 0.1s;
+    }
+
+    .fund-tab:last-child { border-right: 0; }
+    .fund-tab:hover { background: #f4faff; color: var(--head); }
+    .fund-tab.active {
+      background: var(--head-2);
+      color: #fff;
+    }
+
+    .pie-chart {
+      width: min(280px, 100%);
+      aspect-ratio: 1;
+      border-radius: 50%;
+      background: conic-gradient(#d7dde6 0 100%);
+      border: 1px solid var(--line);
+      position: relative;
+    }
+
+    .pie-chart::after {
+      content: '';
+      position: absolute;
+      width: 50%;
+      height: 50%;
+      top: 25%;
+      left: 25%;
+      background: var(--panel);
+      border-radius: 50%;
+      border: 1px solid var(--line);
+      box-shadow: 0 0 0 4px var(--panel);
+    }
+
+    .pie-labels {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    .pie-label {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.55), 0 0 1px rgba(0,0,0,0.4);
+      letter-spacing: -0.1px;
+    }
+
+    .pie-center {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      pointer-events: none;
+      z-index: 2;
+      text-align: center;
+    }
+
+    .pie-center-label {
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .pie-center-value {
+      font-size: 22px;
+      color: var(--head);
+      font-weight: 800;
+      line-height: 1;
+      margin-top: 2px;
+    }
+
+    .col-hidden { display: none; }
+
+    th.fund-grp {
+      background: var(--head-2);
+      box-shadow: inset 0 -2px 0 #f0c44a;
+    }
+
+    .view-selects {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .chart-layout {
+      display: grid;
+      grid-template-columns: minmax(210px, 280px) minmax(0, 1fr);
+      gap: 16px;
+      align-items: center;
+    }
+
+    .pie-wrap {
+      display: grid;
+      justify-items: center;
+      gap: 9px;
+    }
+
+    .pie-chart {
+      width: min(260px, 100%);
+      aspect-ratio: 1;
+      border-radius: 50%;
+      background: conic-gradient(#d7dde6 0 100%);
+      border: 1px solid var(--line);
+    }
+
+    .pie-caption {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(150px, 1fr));
+      gap: 6px 12px;
+      margin-top: 10px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .legend-swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 3px;
+      flex: 0 0 auto;
+    }
+
+    .legend-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .focus-note {
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .table-wrap {
+      overflow: auto;
+      flex: 1 1 auto;
+      min-height: 0;
+      background: #fff;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+    }
+
+    #mpTable { table-layout: fixed; width: 100%; min-width: 1127px; }
+    #mpTable th:nth-child(1),  #mpTable td:nth-child(1)  { width: 175px; }   /* 섹터 (방산/우주/로봇 수용) */
+    #mpTable th:nth-child(2),  #mpTable td:nth-child(2)  { width: 112px; }   /* 세부 */
+    #mpTable th:nth-child(3),  #mpTable td:nth-child(3)  { width: 250px; }   /* 종목명 */
+    #mpTable th:nth-child(4),  #mpTable td:nth-child(4)  { width: 86px; }    /* 목표 */
+    #mpTable th:nth-child(5),  #mpTable td:nth-child(5)  { width: 96px; }    /* 현재가 */
+    #mpTable th:nth-child(6),  #mpTable td:nth-child(6)  { width: 78px; }    /* 상태 */
+    #mpTable th:nth-child(7),  #mpTable td:nth-child(7)  { width: 88px; }    /* 평가 (detail) */
+    #mpTable th:nth-child(8),  #mpTable td:nth-child(8)  { width: 82px; }    /* 비중 */
+    #mpTable th:nth-child(9),  #mpTable td:nth-child(9)  { width: 110px; }   /* 차이(+막대) */
+    #mpTable th:nth-child(10), #mpTable td:nth-child(10) { width: 98px; }    /* 조정수량 */
+    #mpTable th:nth-child(11), #mpTable td:nth-child(11) { width: 84px; }    /* 수익률 (detail) */
+    #mpTable th:nth-child(12), #mpTable td:nth-child(12) { width: 40px; }    /* X */
+    #mpTable td input { box-sizing: border-box; }
+    #mpTable td input.editable { text-overflow: ellipsis; }
+    #mpTable td.col-stockname input { text-overflow: ellipsis; }
+
+    th,
+    td {
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      padding: 9px 11px;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: var(--head);
+      color: #fff;
+      font-weight: 700;
+      text-align: center;
+      padding: 11px 11px;
+      letter-spacing: 0.2px;
+    }
+
+    tbody td { background: #fff; }
+    tbody tr:nth-child(even) td { background: #fafbfd; }
+
+    tbody tr.hidden { display: none; }
+
+    td.number {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    td.center { text-align: center; }
+
+    td.gap-pos { color: var(--ok); font-weight: 700; }
+    td.gap-neg { color: var(--bad); font-weight: 700; }
+    td.gap-zero { color: var(--muted); }
+
+    tbody tr.row-bad td.col-stockname {
+      box-shadow: inset 3px 0 0 var(--bad);
+    }
+    tbody tr.row-bad td.col-stockname::before {
+      content: '● ';
+      color: var(--bad);
+      font-size: 10px;
+      margin-right: 2px;
+    }
+
+    /* Diff inline bar */
+    td.col-diff { padding: 6px 11px; }
+    .diff-cell {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 3px;
+      align-items: center;
+    }
+    .diff-text {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+    }
+    .diff-text.gap-pos { color: var(--ok); }
+    .diff-text.gap-neg { color: var(--bad); }
+    .diff-text.gap-zero { color: var(--muted); }
+    .diff-bar {
+      height: 4px;
+      background: #eef1f5;
+      border-radius: 2px;
+      position: relative;
+      overflow: hidden;
+    }
+    .diff-bar::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 50%;
+      width: 1px;
+      background: var(--line-strong);
+      z-index: 1;
+    }
+    .diff-bar-fill {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      height: 100%;
+    }
+    .diff-bar-fill.pos {
+      left: 50%;
+      background: var(--ok);
+    }
+    .diff-bar-fill.neg {
+      right: 50%;
+      background: var(--bad);
+    }
+
+    /* Consecutive same-sector visual merge */
+    tr.same-sector td.col-sector input {
+      color: transparent;
+    }
+    tr.same-sector td.col-sector input:hover,
+    tr.same-sector td.col-sector input:focus {
+      color: var(--text);
+    }
+
+    /* Column width constraints */
+    #mpTable th.col-sector,
+    #mpTable td.col-sector { min-width: 100px; max-width: 130px; }
+    #mpTable th.col-detail-input,
+    #mpTable td.col-detail-input { min-width: 100px; max-width: 130px; }
+    #mpTable th.col-stockname,
+    #mpTable td.col-stockname {
+      min-width: 220px;
+      font-weight: 700;
+    }
+    #mpTable td.col-stockname input.name-input { font-weight: 700; }
+
+    tfoot td {
+      position: sticky;
+      bottom: 0;
+      background: #f0f4f8;
+      font-weight: 700;
+      color: var(--head);
+      border-top: 2px solid var(--head-2);
+    }
+
+    .legend-item {
+      cursor: pointer;
+      padding: 2px 4px;
+      border-radius: 4px;
+      transition: background 0.1s;
+    }
+    .legend-item:hover { background: #f0f4f8; }
+    .legend-item.active { background: #e0eaf2; }
+
+    .editable {
+      width: 100%;
+      min-width: 92px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text);
+      padding: 4px 6px;
+      border-radius: 4px;
+      transition: background 0.08s, border-color 0.08s;
+    }
+
+    .editable:hover {
+      background: #f1f5f9;
+      border-color: var(--line);
+    }
+
+    .editable:focus {
+      outline: none;
+      background: var(--edit);
+      border-color: #e1c96a;
+      box-shadow: 0 0 0 2px rgba(225, 201, 106, 0.25);
+    }
+
+    .name-input {
+      min-width: 210px;
+    }
+
+    .target-input {
+      width: 82px;
+      text-align: right;
+    }
+    .target-input:focus { text-align: right; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 64px;
+      height: 24px;
+      padding: 0 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .badge.ok {
+      color: var(--ok);
+      background: var(--soft-ok);
+    }
+
+    .badge.warn {
+      color: var(--warn);
+      background: var(--soft-warn);
+    }
+
+    .badge.bad {
+      color: var(--bad);
+      background: var(--soft-bad);
+    }
+
+    .mini-table th {
+      background: #315b7b;
+    }
+
+    .mini-table td:first-child {
+      font-weight: 700;
+      color: var(--head);
+    }
+
+    .validation-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .validation-box {
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .validation-box h3 {
+      margin: 0;
+      padding: 8px 10px;
+      font-size: 13px;
+      color: var(--head);
+      background: #f4f7fa;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .validation-box ul {
+      margin: 0;
+      padding: 8px 10px;
+      list-style: none;
+      display: grid;
+      gap: 5px;
+      max-height: 145px;
+      overflow: auto;
+    }
+
+    .validation-box li {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 1px dashed #e5eaf0;
+      padding-bottom: 4px;
+    }
+
+    .validation-box li:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .calc-box {
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .calc-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .calc-row label {
+      flex: 0 0 56px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .calc-row input {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 5px 8px;
+      border: 1px solid var(--line-strong);
+      border-radius: 5px;
+      font-size: 13px;
+      background: #fff;
+    }
+
+    .calc-row input:focus {
+      outline: none;
+      border-color: var(--head-2);
+      box-shadow: 0 0 0 2px rgba(31, 111, 143, 0.18);
+    }
+
+    .calc-unit {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      flex: 0 0 auto;
+    }
+
+    .calc-output {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 6px 14px;
+      padding: 8px 4px 0;
+      border-top: 1px dashed var(--line);
+    }
+
+    .calc-output > div {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .calc-output strong {
+      font-variant-numeric: tabular-nums;
+      color: var(--head);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .delete-row {
+      width: 30px;
+      padding: 0;
+    }
+
+    @media (max-width: 1100px) {
+      .summary {
+        grid-template-columns: repeat(3, minmax(130px, 1fr));
+      }
+
+      .grid-2 {
+        grid-template-columns: 1fr;
+      }
+
+      .chart-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .table-wrap {
+        max-height: none;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .summary {
+        grid-template-columns: repeat(2, minmax(120px, 1fr));
+      }
+
+      .legend {
+        grid-template-columns: 1fr;
+      }
+
+      .topbar,
+      main {
+        padding-left: 10px;
+        padding-right: 10px;
+      }
+
+      button,
+      select,
+      input {
+        max-width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="topbar">
+      <div class="title-row">
+        <h1>2팀 MP 관리 대시보드</h1>
+        <div class="meta">
+          <span id="workbookMeta"></span>
+          <span id="sourceMeta"></span>
+          <span id="saveMeta"></span>
+        </div>
+      </div>
+      <div class="toolbar">
+        <button class="primary" id="addRowBtn" type="button" title="행 추가 (Ctrl+N)">+ 행 추가</button>
+        <button id="saveBtn" type="button" title="브라우저 저장 (Ctrl+S)">💾 저장</button>
+        <button id="exportBtn" type="button">CSV</button>
+        <button class="danger" id="resetBtn" type="button">초기화</button>
+        <span class="toolbar-divider" aria-hidden="true"></span>
+        <select id="fundSelect" aria-label="테이블 펀드 선택" style="display:none;">
+          <option value="income2">인컴2</option>
+          <option value="blue1">블루1</option>
+          <option value="blue3">블루3</option>
+        </select>
+        <select id="viewModeSelect" aria-label="표시 모드">
+          <option value="simple">간단 표시</option>
+          <option value="detail">상세 표시</option>
+        </select>
+        <select id="sectorSelect" aria-label="섹터 필터">
+          <option value="all">전체 섹터</option>
+        </select>
+        <select id="detailSelect" aria-label="세부 필터">
+          <option value="all">전체 세부</option>
+        </select>
+        <select id="statusFilter" aria-label="상태 필터">
+          <option value="all">전체 상태</option>
+          <option value="ok">OK</option>
+          <option value="missing">원천누락</option>
+          <option value="price">현재가누락</option>
+        </select>
+        <input id="searchInput" type="search" placeholder="🔍 종목/섹터/세부 검색" />
+        <button id="clearFiltersBtn" type="button" title="필터 초기화">필터 해제</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="summary" aria-label="요약">
+      <div class="metric"><div class="label">종목 수</div><div class="value" id="metricRows">0</div></div>
+      <div class="metric"><div class="label">목표비중 합계</div><div class="value" id="metricTarget">0.00%</div></div>
+      <div class="metric" id="metricMissingBox"><div class="label">원천누락</div><div class="value" id="metricMissing">0</div></div>
+      <div class="metric" id="metricPriceBox"><div class="label">현재가누락</div><div class="value" id="metricPriceMissing">0</div></div>
+      <div class="metric"><div class="label">원천 보유종목</div><div class="value" id="metricSourceNames">0</div></div>
+      <div class="metric" id="metricUnlistedBox"><div class="label">MP 미등록</div><div class="value" id="metricUnlisted">0</div></div>
+    </section>
+
+    <section class="workspace">
+      <aside class="panel sector-panel">
+        <div class="panel-head">
+          <span>섹터 ▾</span>
+          <span class="muted" id="sectorCount"></span>
+        </div>
+        <div class="panel-body">
+          <div class="sector-nav" id="sectorNav"></div>
+          <div class="sector-stock-box">
+            <div class="sector-stock-head">
+              <span id="sectorStockTitle">전체 종목</span>
+              <span class="muted" id="sectorStockHint" style="font-size:11px;font-weight:500;">목표▾</span>
+            </div>
+            <ul class="sector-stock-list" id="sectorStockList"></ul>
+          </div>
+        </div>
+      </aside>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="view-selects">
+            <span id="mpTitle">MP 입력</span>
+            <div class="fund-tabs" id="mpFundTabs" role="tablist">
+              <button class="fund-tab active" type="button" data-fund="income2" role="tab">인컴2</button>
+              <button class="fund-tab" type="button" data-fund="blue1" role="tab">블루1</button>
+              <button class="fund-tab" type="button" data-fund="blue3" role="tab">블루3</button>
+            </div>
+          </div>
+          <span class="filter-chips" id="filterChips"></span>
+          <span class="muted" id="visibleCount"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="mpTable">
+            <thead>
+              <tr>
+                <th>섹터</th>
+                <th>세부</th>
+                <th>종목명</th>
+                <th>목표</th>
+                <th>현재가</th>
+                <th>상태</th>
+                <th class="fund-grp col-detail" id="fundValueHead">평가</th>
+                <th class="fund-grp" id="fundWeightHead">비중</th>
+                <th class="fund-grp" id="fundDiffHead">차이</th>
+                <th class="fund-grp" id="fundQtyHead">조정수량</th>
+                <th class="col-detail" id="fundReturnHead">수익률</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="mpBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section class="grid-2">
+      <section class="panel">
+        <div class="panel-head">
+          <div class="view-selects">
+            <span>섹터 요약</span>
+            <div class="fund-tabs" id="sectorFundTabs" role="tablist">
+              <button class="fund-tab active" type="button" data-fund="income2" role="tab">인컴2</button>
+              <button class="fund-tab" type="button" data-fund="blue1" role="tab">블루1</button>
+              <button class="fund-tab" type="button" data-fund="blue3" role="tab">블루3</button>
+            </div>
+            <select id="sectorFundSelect" aria-label="섹터 요약 펀드 선택" style="display:none;">
+              <option value="income2">인컴2</option>
+              <option value="blue1">블루1</option>
+              <option value="blue3">블루3</option>
+            </select>
+          </div>
+          <span class="focus-note" id="sectorSummaryNote"></span>
+        </div>
+        <div class="panel-body">
+          <div class="chart-layout">
+            <div class="pie-wrap">
+              <div class="pie-chart" id="sectorPie" role="img" aria-label="섹터 비중 파이차트">
+                <div class="pie-labels" id="pieLabels" aria-hidden="true"></div>
+                <div class="pie-center">
+                  <div>
+                    <div class="pie-center-label" id="pieCenterLabel">인컴2</div>
+                    <div class="pie-center-value" id="pieCenterValue">0.00%</div>
+                  </div>
+                </div>
+              </div>
+              <div class="pie-caption" id="sectorPieCaption"></div>
+            </div>
+            <div>
+              <table class="mini-table" id="sectorTable">
+                <thead>
+                  <tr>
+                    <th>섹터</th>
+                    <th>목표</th>
+                    <th id="sectorFundHead">인컴2</th>
+                    <th>차이</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+              <div class="legend" id="sectorLegend"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><span>검증</span></div>
+        <div class="panel-body validation-list">
+          <div class="validation-box">
+            <h3>원천누락</h3>
+            <ul id="missingList"></ul>
+          </div>
+          <div class="validation-box">
+            <h3>MP 미등록</h3>
+            <ul id="unlistedList"></ul>
+          </div>
+          <div class="validation-box">
+            <h3>현재가누락</h3>
+            <ul id="priceList"></ul>
+          </div>
+          <div class="validation-box">
+            <h3>주식수 계산기</h3>
+            <div class="calc-box">
+              <div class="calc-row">
+                <label for="calcStock">종목명</label>
+                <input id="calcStock" list="stockList" placeholder="종목 검색 / 선택" autocomplete="off" />
+              </div>
+              <div class="calc-row">
+                <label for="calcWeight">비중</label>
+                <input id="calcWeight" type="text" inputmode="decimal" placeholder="예: 0.5" autocomplete="off" />
+                <span class="calc-unit">%</span>
+              </div>
+              <div class="calc-output">
+                <div><span>현재가</span><strong id="calcPrice">-</strong></div>
+                <div><span>인컴2</span><strong id="calcFund_income2">-</strong></div>
+                <div><span>블루1</span><strong id="calcFund_blue1">-</strong></div>
+                <div><span>블루3</span><strong id="calcFund_blue3">-</strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <datalist id="stockList"></datalist>
+  <datalist id="sectorList"></datalist>
+  <datalist id="detailList"></datalist>
+
+  <script>
+    const DATA = {"workbook":"hf2_mp__20260624.xlsx","generatedAt":"2026-06-24 17:24:06","workbookModifiedAt":"2026-06-23 15:41:36","workbookSize":92430,"sourceDate":"2026-06-22","funds":[{"key":"income2","label":"인컴2","code":"300019","navEok":230.8701322,"bondEok":128.6128,"stockAvailableEok":96.9793322,"stockTargetEok":14.54689983},{"key":"blue1","label":"블루1","code":"300037","navEok":192.54978427,"bondEok":84.440585,"stockAvailableEok":95.77657257,"stockTargetEok":14.3664858855},{"key":"blue3","label":"블루3","code":"300085","navEok":210.06083219,"bondEok":115.5814,"stockAvailableEok":94.47943219000001,"stockTargetEok":14.171914828500002}],"holdings":[{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7367760006","stockName":"RISE 네트워크인프라","prevQty":13500.0,"settleQty":15000.0,"orderQty":15000.0,"price":79825.0,"cost":914996654.0,"value":1197375000.0,"returnPct":30.86,"dayChangePct":-10.36,"sourceSheet":"인컴2","sourceRow":3},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7087010005","stockName":"펩트론","prevQty":2800.0,"settleQty":2800.0,"orderQty":2800.0,"price":188500.0,"cost":767200000.0,"value":527800000.0,"returnPct":-31.2,"dayChangePct":-8.04,"sourceSheet":"인컴2","sourceRow":4},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7233740000","stockName":"KODEX 코스닥150레버리지","prevQty":48000.0,"settleQty":48000.0,"orderQty":48000.0,"price":10175.0,"cost":720810401.0,"value":488400000.0,"returnPct":-32.24,"dayChangePct":-15.8,"sourceSheet":"인컴2","sourceRow":5},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7160980009","stockName":"싸이맥스","prevQty":10000.0,"settleQty":10000.0,"orderQty":10000.0,"price":33700.0,"cost":347526041.0,"value":337000000.0,"returnPct":-3.02,"dayChangePct":-11.54,"sourceSheet":"인컴2","sourceRow":6},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR70043Y0003","stockName":"TIME 차이나AI테크액티브","prevQty":10000.0,"settleQty":12000.0,"orderQty":12000.0,"price":26795.0,"cost":226321662.0,"value":321540000.0,"returnPct":42.07,"dayChangePct":-7.23,"sourceSheet":"인컴2","sourceRow":7},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR70117V0007","stockName":"TIGER 코리아AI전력기기TOP3플러스","prevQty":13000.0,"settleQty":13000.0,"orderQty":13000.0,"price":22200.0,"cost":295962447.0,"value":288600000.0,"returnPct":-2.48,"dayChangePct":-6.62,"sourceSheet":"인컴2","sourceRow":8},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7466930005","stockName":"SOL 자동차TOP3플러스","prevQty":9000.0,"settleQty":9000.0,"orderQty":9000.0,"price":30145.0,"cost":279256958.0,"value":271305000.0,"returnPct":-2.84,"dayChangePct":-11.06,"sourceSheet":"인컴2","sourceRow":9},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7261140008","stockName":"TIGER 우선주","prevQty":10000.0,"settleQty":10000.0,"orderQty":10000.0,"price":26875.0,"cost":300715905.0,"value":268750000.0,"returnPct":-10.62,"dayChangePct":-7.88,"sourceSheet":"인컴2","sourceRow":10},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7034020008","stockName":"두산에너빌리티","prevQty":3000.0,"settleQty":3000.0,"orderQty":3000.0,"price":89200.0,"cost":271800000.0,"value":267600000.0,"returnPct":-1.54,"dayChangePct":-5.3,"sourceSheet":"인컴2","sourceRow":11},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR70148J0006","stockName":"TIGER 코리아휴머노이드로봇산업","prevQty":30000.0,"settleQty":25000.0,"orderQty":25000.0,"price":10070.0,"cost":330302002.0,"value":251750000.0,"returnPct":-23.78,"dayChangePct":-11.97,"sourceSheet":"인컴2","sourceRow":12},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7445090004","stockName":"에이직랜드","prevQty":10000.0,"settleQty":10000.0,"orderQty":10000.0,"price":23750.0,"cost":306243044.0,"value":237500000.0,"returnPct":-22.44,"dayChangePct":-12.03,"sourceSheet":"인컴2","sourceRow":13},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7080220007","stockName":"제주반도체","prevQty":2000.0,"settleQty":2000.0,"orderQty":2000.0,"price":110800.0,"cost":236117010.0,"value":221600000.0,"returnPct":-6.14,"dayChangePct":-17.31,"sourceSheet":"인컴2","sourceRow":14},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7271050007","stockName":"KODEX WTI원유선물인버스(H)","prevQty":99000.0,"settleQty":87000.0,"orderQty":87000.0,"price":2425.0,"cost":175255914.0,"value":210975000.0,"returnPct":20.38,"dayChangePct":2.75,"sourceSheet":"인컴2","sourceRow":15},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7365270008","stockName":"큐라클","prevQty":17000.0,"settleQty":17000.0,"orderQty":17000.0,"price":12170.0,"cost":263472874.0,"value":206890000.0,"returnPct":-21.47,"dayChangePct":-12.82,"sourceSheet":"인컴2","sourceRow":16},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7011070000","stockName":"LG이노텍","prevQty":200.0,"settleQty":200.0,"orderQty":200.0,"price":991000.0,"cost":257946430.0,"value":198200000.0,"returnPct":-23.16,"dayChangePct":-12.3,"sourceSheet":"인컴2","sourceRow":17},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7009151002","stockName":"삼성전기우","prevQty":150.0,"settleQty":236.0,"orderQty":250.0,"price":817000.0,"cost":214677807.0,"value":192812000.0,"returnPct":-10.18,"dayChangePct":-14.36,"sourceSheet":"인컴2","sourceRow":18},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR70181B0002","stockName":"HANARO 미국AI메모리반도체TOP4+","prevQty":13500.0,"settleQty":13500.0,"orderQty":13500.0,"price":13875.0,"cost":157760112.0,"value":187312500.0,"returnPct":18.73,"dayChangePct":-5.83,"sourceSheet":"인컴2","sourceRow":19},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7000990002","stockName":"DB하이텍","prevQty":1200.0,"settleQty":1200.0,"orderQty":1200.0,"price":151100.0,"cost":219270341.0,"value":181320000.0,"returnPct":-17.3,"dayChangePct":-13.16,"sourceSheet":"인컴2","sourceRow":20},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7402340004","stockName":"SK스퀘어","prevQty":0.0,"settleQty":97.0,"orderQty":150.0,"price":1832000.0,"cost":188957500.0,"value":177704000.0,"returnPct":-5.95,"dayChangePct":-7.0,"sourceSheet":"인컴2","sourceRow":21},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7003550001","stockName":"LG","prevQty":1800.0,"settleQty":1800.0,"orderQty":1800.0,"price":98600.0,"cost":189286799.0,"value":177480000.0,"returnPct":-6.23,"dayChangePct":-10.28,"sourceSheet":"인컴2","sourceRow":22},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7475300000","stockName":"SOL 반도체전공정","prevQty":7000.0,"settleQty":7000.0,"orderQty":7000.0,"price":25070.0,"cost":173696324.0,"value":175490000.0,"returnPct":1.03,"dayChangePct":-11.22,"sourceSheet":"인컴2","sourceRow":23},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7476260005","stockName":"HANARO 반도체핵심공정주도주","prevQty":11000.0,"settleQty":11000.0,"orderQty":11000.0,"price":15470.0,"cost":160294102.0,"value":170170000.0,"returnPct":6.16,"dayChangePct":-12.07,"sourceSheet":"인컴2","sourceRow":24},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7127120004","stockName":"제이에스링크","prevQty":5500.0,"settleQty":5500.0,"orderQty":5500.0,"price":30900.0,"cost":215344701.0,"value":169950000.0,"returnPct":-21.08,"dayChangePct":-12.34,"sourceSheet":"인컴2","sourceRow":25},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7494340003","stockName":"ACE 글로벌AI맞춤형반도체","prevQty":6100.0,"settleQty":6100.0,"orderQty":6100.0,"price":27720.0,"cost":164919324.0,"value":169092000.0,"returnPct":2.53,"dayChangePct":-6.8,"sourceSheet":"인컴2","sourceRow":26},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7010780005","stockName":"아이에스동서","prevQty":8000.0,"settleQty":8000.0,"orderQty":8000.0,"price":21050.0,"cost":207598395.0,"value":168400000.0,"returnPct":-18.88,"dayChangePct":-13.19,"sourceSheet":"인컴2","sourceRow":27},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR70168K0008","stockName":"TIGER 기술이전바이오액티브","prevQty":23000.0,"settleQty":23000.0,"orderQty":23000.0,"price":6820.0,"cost":223773154.0,"value":156860000.0,"returnPct":-29.9,"dayChangePct":-4.94,"sourceSheet":"인컴2","sourceRow":28},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7139220008","stockName":"TIGER 200 건설","prevQty":18000.0,"settleQty":18000.0,"orderQty":18000.0,"price":7880.0,"cost":147231075.0,"value":141840000.0,"returnPct":-3.66,"dayChangePct":-11.56,"sourceSheet":"인컴2","sourceRow":29},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7353200009","stockName":"대덕전자","prevQty":1000.0,"settleQty":1000.0,"orderQty":1000.0,"price":140400.0,"cost":176848565.0,"value":140400000.0,"returnPct":-20.61,"dayChangePct":-9.41,"sourceSheet":"인컴2","sourceRow":30},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7475310009","stockName":"SOL 반도체후공정","prevQty":4500.0,"settleQty":4500.0,"orderQty":4500.0,"price":30340.0,"cost":155625896.0,"value":136530000.0,"returnPct":-12.27,"dayChangePct":-10.63,"sourceSheet":"인컴2","sourceRow":31},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7000150003","stockName":"두산","prevQty":0.0,"settleQty":86.0,"orderQty":100.0,"price":1531000.0,"cost":139712500.0,"value":131666000.0,"returnPct":-5.75,"dayChangePct":-6.13,"sourceSheet":"인컴2","sourceRow":32},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7347850000","stockName":"디앤디파마텍","prevQty":1200.0,"settleQty":1200.0,"orderQty":1200.0,"price":96100.0,"cost":132601325.0,"value":115320000.0,"returnPct":-13.03,"dayChangePct":-10.6,"sourceSheet":"인컴2","sourceRow":33},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7457990000","stockName":"PLUS 태양광&ESS","prevQty":5000.0,"settleQty":3000.0,"orderQty":3000.0,"price":36010.0,"cost":135299256.0,"value":108030000.0,"returnPct":-20.15,"dayChangePct":-9.3,"sourceSheet":"인컴2","sourceRow":34},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7174900001","stockName":"앱클론","prevQty":5000.0,"settleQty":3000.0,"orderQty":3000.0,"price":26450.0,"cost":159442446.0,"value":79350000.0,"returnPct":-50.23,"dayChangePct":-7.67,"sourceSheet":"인컴2","sourceRow":35},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7327260006","stockName":"RF머트리얼즈","prevQty":86.0,"settleQty":86.0,"orderQty":86.0,"price":55400.0,"cost":4515000.0,"value":4764400.0,"returnPct":5.52,"dayChangePct":-11.07,"sourceSheet":"인컴2","sourceRow":36},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7493280002","stockName":"아이엠바이오로직스","prevQty":54.0,"settleQty":54.0,"orderQty":54.0,"price":20500.0,"cost":1418040.0,"value":1107000.0,"returnPct":-21.93,"dayChangePct":-9.29,"sourceSheet":"인컴2","sourceRow":37},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR70088M0003","stockName":"메쥬","prevQty":57.0,"settleQty":57.0,"orderQty":57.0,"price":16110.0,"cost":1243512.0,"value":918270.0,"returnPct":-26.15,"dayChangePct":-6.71,"sourceSheet":"인컴2","sourceRow":38},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7394420004","stockName":"리센스메디컬","prevQty":17.0,"settleQty":17.0,"orderQty":17.0,"price":21400.0,"cost":188870.0,"value":363800.0,"returnPct":92.61,"dayChangePct":-3.82,"sourceSheet":"인컴2","sourceRow":39},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7439960006","stockName":"코스모로보틱스","prevQty":17.0,"settleQty":17.0,"orderQty":17.0,"price":18100.0,"cost":103020.0,"value":307700.0,"returnPct":198.67,"dayChangePct":-11.7,"sourceSheet":"인컴2","sourceRow":40},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7487580003","stockName":"폴레드","prevQty":51.0,"settleQty":51.0,"orderQty":51.0,"price":3380.0,"cost":257550.0,"value":172380.0,"returnPct":-33.06,"dayChangePct":-5.98,"sourceSheet":"인컴2","sourceRow":41},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR70192M0006","stockName":"RISE 삼성전자단일종목레버리지","prevQty":9000.0,"settleQty":0.0,"orderQty":0.0,"price":19575.0,"cost":0.0,"value":0.0,"returnPct":-18.01,"dayChangePct":-24.58,"sourceSheet":"인컴2","sourceRow":42},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7034230003","stockName":"파라다이스","prevQty":15000.0,"settleQty":0.0,"orderQty":0.0,"price":12860.0,"cost":0.0,"value":0.0,"returnPct":-11.63,"dayChangePct":-7.87,"sourceSheet":"인컴2","sourceRow":43},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7035420009","stockName":"NAVER","prevQty":1000.0,"settleQty":0.0,"orderQty":0.0,"price":202500.0,"cost":0.0,"value":0.0,"returnPct":-16.65,"dayChangePct":-8.78,"sourceSheet":"인컴2","sourceRow":44},{"fundKey":"income2","fundLabel":"인컴2","fundCode":"300019","fundName":"이지스 인컴플러스 일반사모투자신탁 제2호","stockCode":"KR7140700006","stockName":"KODEX 보험","prevQty":15000.0,"settleQty":0.0,"orderQty":0.0,"price":19510.0,"cost":0.0,"value":0.0,"returnPct":-0.2,"dayChangePct":-3.65,"sourceSheet":"인컴2","sourceRow":45},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7000150003","stockName":"두산","prevQty":0.0,"settleQty":86.0,"orderQty":100.0,"price":1531000.0,"cost":139712500.0,"value":131666000.0,"returnPct":-5.75,"dayChangePct":-6.13,"sourceSheet":"블루1","sourceRow":3},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7000990002","stockName":"DB하이텍","prevQty":1200.0,"settleQty":1200.0,"orderQty":1200.0,"price":151100.0,"cost":219264951.0,"value":181320000.0,"returnPct":-17.3,"dayChangePct":-13.16,"sourceSheet":"블루1","sourceRow":4},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7002990000","stockName":"금호건설","prevQty":55600.0,"settleQty":55600.0,"orderQty":55600.0,"price":3730.0,"cost":199575645.0,"value":207388000.0,"returnPct":3.91,"dayChangePct":-7.44,"sourceSheet":"블루1","sourceRow":5},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7003550001","stockName":"LG","prevQty":1800.0,"settleQty":1800.0,"orderQty":1800.0,"price":98600.0,"cost":189284546.0,"value":177480000.0,"returnPct":-6.23,"dayChangePct":-10.28,"sourceSheet":"블루1","sourceRow":6},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR70043Y0003","stockName":"TIME 차이나AI테크액티브","prevQty":8000.0,"settleQty":10000.0,"orderQty":10000.0,"price":26795.0,"cost":209184850.0,"value":267950000.0,"returnPct":28.09,"dayChangePct":-7.23,"sourceSheet":"블루1","sourceRow":7},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR70088M0003","stockName":"메쥬","prevQty":57.0,"settleQty":57.0,"orderQty":57.0,"price":16110.0,"cost":1243512.0,"value":918270.0,"returnPct":-26.15,"dayChangePct":-6.71,"sourceSheet":"블루1","sourceRow":8},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7009151002","stockName":"삼성전기우","prevQty":150.0,"settleQty":236.0,"orderQty":250.0,"price":817000.0,"cost":214676807.0,"value":192812000.0,"returnPct":-10.18,"dayChangePct":-14.36,"sourceSheet":"블루1","sourceRow":9},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7010780005","stockName":"아이에스동서","prevQty":10100.0,"settleQty":10100.0,"orderQty":10100.0,"price":21050.0,"cost":201062050.0,"value":212605000.0,"returnPct":5.74,"dayChangePct":-13.19,"sourceSheet":"블루1","sourceRow":10},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7011070000","stockName":"LG이노텍","prevQty":200.0,"settleQty":200.0,"orderQty":200.0,"price":991000.0,"cost":258095835.0,"value":198200000.0,"returnPct":-23.2,"dayChangePct":-12.3,"sourceSheet":"블루1","sourceRow":11},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR70117V0007","stockName":"TIGER 코리아AI전력기기TOP3플러스","prevQty":13000.0,"settleQty":13000.0,"orderQty":13000.0,"price":22200.0,"cost":295959103.0,"value":288600000.0,"returnPct":-2.48,"dayChangePct":-6.62,"sourceSheet":"블루1","sourceRow":12},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR70148J0006","stockName":"TIGER 코리아휴머노이드로봇산업","prevQty":30000.0,"settleQty":25000.0,"orderQty":25000.0,"price":10070.0,"cost":330300522.0,"value":251750000.0,"returnPct":-23.78,"dayChangePct":-11.97,"sourceSheet":"블루1","sourceRow":13},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR70168K0008","stockName":"TIGER 기술이전바이오액티브","prevQty":23000.0,"settleQty":23000.0,"orderQty":23000.0,"price":6820.0,"cost":223781941.0,"value":156860000.0,"returnPct":-29.9,"dayChangePct":-4.94,"sourceSheet":"블루1","sourceRow":14},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7017800004","stockName":"현대엘리베이터","prevQty":2000.0,"settleQty":2000.0,"orderQty":2000.0,"price":71000.0,"cost":156200000.0,"value":142000000.0,"returnPct":-9.09,"dayChangePct":-4.69,"sourceSheet":"블루1","sourceRow":15},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR70181B0002","stockName":"HANARO 미국AI메모리반도체TOP4+","prevQty":13500.0,"settleQty":13500.0,"orderQty":13500.0,"price":13875.0,"cost":157771160.0,"value":187312500.0,"returnPct":18.72,"dayChangePct":-5.83,"sourceSheet":"블루1","sourceRow":16},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR70192M0006","stockName":"RISE 삼성전자단일종목레버리지","prevQty":9000.0,"settleQty":0.0,"orderQty":0.0,"price":19575.0,"cost":0.0,"value":0.0,"returnPct":-18.01,"dayChangePct":-24.58,"sourceSheet":"블루1","sourceRow":17},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7034020008","stockName":"두산에너빌리티","prevQty":4000.0,"settleQty":4000.0,"orderQty":4000.0,"price":89200.0,"cost":259200000.0,"value":356800000.0,"returnPct":37.65,"dayChangePct":-5.3,"sourceSheet":"블루1","sourceRow":18},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7034230003","stockName":"파라다이스","prevQty":15000.0,"settleQty":0.0,"orderQty":0.0,"price":12860.0,"cost":0.0,"value":0.0,"returnPct":-11.63,"dayChangePct":-7.87,"sourceSheet":"블루1","sourceRow":19},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7035420009","stockName":"NAVER","prevQty":1000.0,"settleQty":0.0,"orderQty":0.0,"price":202500.0,"cost":0.0,"value":0.0,"returnPct":-16.65,"dayChangePct":-8.78,"sourceSheet":"블루1","sourceRow":20},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7080220007","stockName":"제주반도체","prevQty":2000.0,"settleQty":2000.0,"orderQty":2000.0,"price":110800.0,"cost":236071435.0,"value":221600000.0,"returnPct":-6.13,"dayChangePct":-17.31,"sourceSheet":"블루1","sourceRow":21},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7127120004","stockName":"제이에스링크","prevQty":5500.0,"settleQty":5500.0,"orderQty":5500.0,"price":30900.0,"cost":215277588.0,"value":169950000.0,"returnPct":-21.05,"dayChangePct":-12.34,"sourceSheet":"블루1","sourceRow":22},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7139220008","stockName":"TIGER 200 건설","prevQty":18000.0,"settleQty":18000.0,"orderQty":18000.0,"price":7880.0,"cost":147228395.0,"value":141840000.0,"returnPct":-3.65,"dayChangePct":-11.56,"sourceSheet":"블루1","sourceRow":23},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7140700006","stockName":"KODEX 보험","prevQty":15000.0,"settleQty":0.0,"orderQty":0.0,"price":19510.0,"cost":0.0,"value":0.0,"returnPct":-0.24,"dayChangePct":-3.65,"sourceSheet":"블루1","sourceRow":24},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7160980009","stockName":"싸이맥스","prevQty":10000.0,"settleQty":10000.0,"orderQty":10000.0,"price":33700.0,"cost":347555498.0,"value":337000000.0,"returnPct":-3.03,"dayChangePct":-11.54,"sourceSheet":"블루1","sourceRow":25},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7174900001","stockName":"앱클론","prevQty":5000.0,"settleQty":3000.0,"orderQty":3000.0,"price":26450.0,"cost":160502699.0,"value":79350000.0,"returnPct":-50.56,"dayChangePct":-7.67,"sourceSheet":"블루1","sourceRow":26},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7233740000","stockName":"KODEX 코스닥150레버리지","prevQty":48000.0,"settleQty":48000.0,"orderQty":48000.0,"price":10175.0,"cost":734741640.0,"value":488400000.0,"returnPct":-33.52,"dayChangePct":-15.8,"sourceSheet":"블루1","sourceRow":27},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7261140008","stockName":"TIGER 우선주","prevQty":10000.0,"settleQty":10000.0,"orderQty":10000.0,"price":26875.0,"cost":300719130.0,"value":268750000.0,"returnPct":-10.63,"dayChangePct":-7.88,"sourceSheet":"블루1","sourceRow":28},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7271050007","stockName":"KODEX WTI원유선물인버스(H)","prevQty":99000.0,"settleQty":87000.0,"orderQty":87000.0,"price":2425.0,"cost":175255446.0,"value":210975000.0,"returnPct":20.38,"dayChangePct":2.75,"sourceSheet":"블루1","sourceRow":29},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7327260006","stockName":"RF머트리얼즈","prevQty":85.0,"settleQty":85.0,"orderQty":85.0,"price":55400.0,"cost":4462500.0,"value":4709000.0,"returnPct":5.52,"dayChangePct":-11.07,"sourceSheet":"블루1","sourceRow":30},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7347850000","stockName":"디앤디파마텍","prevQty":1200.0,"settleQty":1200.0,"orderQty":1200.0,"price":96100.0,"cost":132601225.0,"value":115320000.0,"returnPct":-13.03,"dayChangePct":-10.6,"sourceSheet":"블루1","sourceRow":31},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7350520003","stockName":"이지스레지던스리츠","prevQty":260346.0,"settleQty":260346.0,"orderQty":260346.0,"price":3395.0,"cost":1005950338.0,"value":883874670.0,"returnPct":-12.13,"dayChangePct":-1.45,"sourceSheet":"블루1","sourceRow":32},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7353200009","stockName":"대덕전자","prevQty":1000.0,"settleQty":1000.0,"orderQty":1000.0,"price":140400.0,"cost":176848565.0,"value":140400000.0,"returnPct":-20.61,"dayChangePct":-9.41,"sourceSheet":"블루1","sourceRow":33},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7365270008","stockName":"큐라클","prevQty":17000.0,"settleQty":17000.0,"orderQty":17000.0,"price":12170.0,"cost":263474685.0,"value":206890000.0,"returnPct":-21.47,"dayChangePct":-12.82,"sourceSheet":"블루1","sourceRow":34},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7367760006","stockName":"RISE 네트워크인프라","prevQty":13500.0,"settleQty":15000.0,"orderQty":15000.0,"price":79825.0,"cost":915004701.0,"value":1197375000.0,"returnPct":30.85,"dayChangePct":-10.36,"sourceSheet":"블루1","sourceRow":35},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7394420004","stockName":"리센스메디컬","prevQty":43.0,"settleQty":43.0,"orderQty":43.0,"price":21400.0,"cost":477730.0,"value":920200.0,"returnPct":92.61,"dayChangePct":-3.82,"sourceSheet":"블루1","sourceRow":36},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7402340004","stockName":"SK스퀘어","prevQty":0.0,"settleQty":96.0,"orderQty":150.0,"price":1832000.0,"cost":187054500.0,"value":175872000.0,"returnPct":-5.97,"dayChangePct":-7.0,"sourceSheet":"블루1","sourceRow":37},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7445090004","stockName":"에이직랜드","prevQty":10000.0,"settleQty":10000.0,"orderQty":10000.0,"price":23750.0,"cost":306234385.0,"value":237500000.0,"returnPct":-22.44,"dayChangePct":-12.03,"sourceSheet":"블루1","sourceRow":38},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7457990000","stockName":"PLUS 태양광&ESS","prevQty":5000.0,"settleQty":3000.0,"orderQty":3000.0,"price":36010.0,"cost":135310858.0,"value":108030000.0,"returnPct":-20.16,"dayChangePct":-9.3,"sourceSheet":"블루1","sourceRow":39},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7466930005","stockName":"SOL 자동차TOP3플러스","prevQty":9000.0,"settleQty":9000.0,"orderQty":9000.0,"price":30145.0,"cost":279330287.0,"value":271305000.0,"returnPct":-2.87,"dayChangePct":-11.06,"sourceSheet":"블루1","sourceRow":40},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7475300000","stockName":"SOL 반도체전공정","prevQty":7000.0,"settleQty":7000.0,"orderQty":7000.0,"price":25070.0,"cost":173697806.0,"value":175490000.0,"returnPct":1.03,"dayChangePct":-11.22,"sourceSheet":"블루1","sourceRow":41},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7475310009","stockName":"SOL 반도체후공정","prevQty":4500.0,"settleQty":4500.0,"orderQty":4500.0,"price":30340.0,"cost":155620823.0,"value":136530000.0,"returnPct":-12.26,"dayChangePct":-10.63,"sourceSheet":"블루1","sourceRow":42},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7476260005","stockName":"HANARO 반도체핵심공정주도주","prevQty":11000.0,"settleQty":11000.0,"orderQty":11000.0,"price":15470.0,"cost":160291971.0,"value":170170000.0,"returnPct":6.16,"dayChangePct":-12.07,"sourceSheet":"블루1","sourceRow":43},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7493280002","stockName":"아이엠바이오로직스","prevQty":54.0,"settleQty":54.0,"orderQty":54.0,"price":20500.0,"cost":1418040.0,"value":1107000.0,"returnPct":-21.93,"dayChangePct":-9.29,"sourceSheet":"블루1","sourceRow":44},{"fundKey":"blue1","fundLabel":"블루1","fundCode":"300037","fundName":"이지스블루ON일반사모투자신탁제1호","stockCode":"KR7494340003","stockName":"ACE 글로벌AI맞춤형반도체","prevQty":6100.0,"settleQty":6100.0,"orderQty":6100.0,"price":27720.0,"cost":164917685.0,"value":169092000.0,"returnPct":2.53,"dayChangePct":-6.8,"sourceSheet":"블루1","sourceRow":45},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7000150003","stockName":"두산","prevQty":0.0,"settleQty":86.0,"orderQty":100.0,"price":1531000.0,"cost":139653000.0,"value":131666000.0,"returnPct":-5.71,"dayChangePct":-6.13,"sourceSheet":"블루3","sourceRow":3},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7000990002","stockName":"DB하이텍","prevQty":1200.0,"settleQty":1200.0,"orderQty":1200.0,"price":151100.0,"cost":219271160.0,"value":181320000.0,"returnPct":-17.3,"dayChangePct":-13.16,"sourceSheet":"블루3","sourceRow":4},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7003550001","stockName":"LG","prevQty":1800.0,"settleQty":1800.0,"orderQty":1800.0,"price":98600.0,"cost":189285997.0,"value":177480000.0,"returnPct":-6.23,"dayChangePct":-10.28,"sourceSheet":"블루3","sourceRow":5},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR70043Y0003","stockName":"TIME 차이나AI테크액티브","prevQty":8000.0,"settleQty":10000.0,"orderQty":10000.0,"price":26795.0,"cost":209435073.0,"value":267950000.0,"returnPct":27.93,"dayChangePct":-7.23,"sourceSheet":"블루3","sourceRow":6},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7009151002","stockName":"삼성전기우","prevQty":150.0,"settleQty":236.0,"orderQty":250.0,"price":817000.0,"cost":214770040.0,"value":192812000.0,"returnPct":-10.22,"dayChangePct":-14.36,"sourceSheet":"블루3","sourceRow":7},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7010780005","stockName":"아이에스동서","prevQty":8000.0,"settleQty":8000.0,"orderQty":8000.0,"price":21050.0,"cost":207612084.0,"value":168400000.0,"returnPct":-18.88,"dayChangePct":-13.19,"sourceSheet":"블루3","sourceRow":8},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7011070000","stockName":"LG이노텍","prevQty":200.0,"settleQty":200.0,"orderQty":200.0,"price":991000.0,"cost":258093330.0,"value":198200000.0,"returnPct":-23.2,"dayChangePct":-12.3,"sourceSheet":"블루3","sourceRow":9},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR70117V0007","stockName":"TIGER 코리아AI전력기기TOP3플러스","prevQty":13000.0,"settleQty":13000.0,"orderQty":13000.0,"price":22200.0,"cost":296005977.0,"value":288600000.0,"returnPct":-2.5,"dayChangePct":-6.62,"sourceSheet":"블루3","sourceRow":10},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR70148J0006","stockName":"TIGER 코리아휴머노이드로봇산업","prevQty":30000.0,"settleQty":25000.0,"orderQty":25000.0,"price":10070.0,"cost":330300599.0,"value":251750000.0,"returnPct":-23.78,"dayChangePct":-11.97,"sourceSheet":"블루3","sourceRow":11},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR70168K0008","stockName":"TIGER 기술이전바이오액티브","prevQty":23000.0,"settleQty":23000.0,"orderQty":23000.0,"price":6820.0,"cost":223781940.0,"value":156860000.0,"returnPct":-29.9,"dayChangePct":-4.94,"sourceSheet":"블루3","sourceRow":12},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR70181B0002","stockName":"HANARO 미국AI메모리반도체TOP4+","prevQty":13500.0,"settleQty":13500.0,"orderQty":13500.0,"price":13875.0,"cost":157767148.0,"value":187312500.0,"returnPct":18.72,"dayChangePct":-5.83,"sourceSheet":"블루3","sourceRow":13},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR70192M0006","stockName":"RISE 삼성전자단일종목레버리지","prevQty":9000.0,"settleQty":0.0,"orderQty":0.0,"price":19575.0,"cost":0.0,"value":0.0,"returnPct":-18.1,"dayChangePct":-24.58,"sourceSheet":"블루3","sourceRow":14},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7034020008","stockName":"두산에너빌리티","prevQty":3000.0,"settleQty":3000.0,"orderQty":3000.0,"price":89200.0,"cost":283108780.0,"value":267600000.0,"returnPct":-5.47,"dayChangePct":-5.3,"sourceSheet":"블루3","sourceRow":15},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7034230003","stockName":"파라다이스","prevQty":15000.0,"settleQty":0.0,"orderQty":0.0,"price":12860.0,"cost":0.0,"value":0.0,"returnPct":-11.58,"dayChangePct":-7.87,"sourceSheet":"블루3","sourceRow":16},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7035420009","stockName":"NAVER","prevQty":1000.0,"settleQty":0.0,"orderQty":0.0,"price":202500.0,"cost":0.0,"value":0.0,"returnPct":-16.67,"dayChangePct":-8.78,"sourceSheet":"블루3","sourceRow":17},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7080220007","stockName":"제주반도체","prevQty":2000.0,"settleQty":2000.0,"orderQty":2000.0,"price":110800.0,"cost":236096560.0,"value":221600000.0,"returnPct":-6.14,"dayChangePct":-17.31,"sourceSheet":"블루3","sourceRow":18},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7127120004","stockName":"제이에스링크","prevQty":5500.0,"settleQty":5500.0,"orderQty":5500.0,"price":30900.0,"cost":210559239.0,"value":169950000.0,"returnPct":-19.28,"dayChangePct":-12.34,"sourceSheet":"블루3","sourceRow":19},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7139220008","stockName":"TIGER 200 건설","prevQty":18000.0,"settleQty":18000.0,"orderQty":18000.0,"price":7880.0,"cost":147337820.0,"value":141840000.0,"returnPct":-3.73,"dayChangePct":-11.56,"sourceSheet":"블루3","sourceRow":20},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7140700006","stockName":"KODEX 보험","prevQty":15000.0,"settleQty":0.0,"orderQty":0.0,"price":19510.0,"cost":0.0,"value":0.0,"returnPct":-0.22,"dayChangePct":-3.65,"sourceSheet":"블루3","sourceRow":21},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7160980009","stockName":"싸이맥스","prevQty":10000.0,"settleQty":10000.0,"orderQty":10000.0,"price":33700.0,"cost":347549143.0,"value":337000000.0,"returnPct":-3.03,"dayChangePct":-11.54,"sourceSheet":"블루3","sourceRow":22},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7174900001","stockName":"앱클론","prevQty":5000.0,"settleQty":3000.0,"orderQty":3000.0,"price":26450.0,"cost":145966751.0,"value":79350000.0,"returnPct":-45.63,"dayChangePct":-7.67,"sourceSheet":"블루3","sourceRow":23},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7233740000","stockName":"KODEX 코스닥150레버리지","prevQty":48000.0,"settleQty":48000.0,"orderQty":48000.0,"price":10175.0,"cost":681562365.0,"value":488400000.0,"returnPct":-28.34,"dayChangePct":-15.8,"sourceSheet":"블루3","sourceRow":24},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7261140008","stockName":"TIGER 우선주","prevQty":10000.0,"settleQty":10000.0,"orderQty":10000.0,"price":26875.0,"cost":300718625.0,"value":268750000.0,"returnPct":-10.63,"dayChangePct":-7.88,"sourceSheet":"블루3","sourceRow":25},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7271050007","stockName":"KODEX WTI원유선물인버스(H)","prevQty":98700.0,"settleQty":86700.0,"orderQty":86700.0,"price":2425.0,"cost":174651283.0,"value":210247500.0,"returnPct":20.38,"dayChangePct":2.75,"sourceSheet":"블루3","sourceRow":26},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7327260006","stockName":"RF머트리얼즈","prevQty":86.0,"settleQty":86.0,"orderQty":86.0,"price":55400.0,"cost":4515000.0,"value":4764400.0,"returnPct":5.52,"dayChangePct":-11.07,"sourceSheet":"블루3","sourceRow":27},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7347850000","stockName":"디앤디파마텍","prevQty":1200.0,"settleQty":1200.0,"orderQty":1200.0,"price":96100.0,"cost":132628890.0,"value":115320000.0,"returnPct":-13.05,"dayChangePct":-10.6,"sourceSheet":"블루3","sourceRow":28},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7353200009","stockName":"대덕전자","prevQty":1000.0,"settleQty":1000.0,"orderQty":1000.0,"price":140400.0,"cost":176848565.0,"value":140400000.0,"returnPct":-20.61,"dayChangePct":-9.41,"sourceSheet":"블루3","sourceRow":29},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7365270008","stockName":"큐라클","prevQty":17000.0,"settleQty":17000.0,"orderQty":17000.0,"price":12170.0,"cost":253825749.0,"value":206890000.0,"returnPct":-18.49,"dayChangePct":-12.82,"sourceSheet":"블루3","sourceRow":30},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7367760006","stockName":"RISE 네트워크인프라","prevQty":13500.0,"settleQty":15000.0,"orderQty":15000.0,"price":79825.0,"cost":914924700.0,"value":1197375000.0,"returnPct":30.87,"dayChangePct":-10.36,"sourceSheet":"블루3","sourceRow":31},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7402340004","stockName":"SK스퀘어","prevQty":0.0,"settleQty":95.0,"orderQty":150.0,"price":1832000.0,"cost":185192000.0,"value":174040000.0,"returnPct":-6.02,"dayChangePct":-7.0,"sourceSheet":"블루3","sourceRow":32},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7445090004","stockName":"에이직랜드","prevQty":10000.0,"settleQty":10000.0,"orderQty":10000.0,"price":23750.0,"cost":306240666.0,"value":237500000.0,"returnPct":-22.44,"dayChangePct":-12.03,"sourceSheet":"블루3","sourceRow":33},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7457990000","stockName":"PLUS 태양광&ESS","prevQty":5000.0,"settleQty":3000.0,"orderQty":3000.0,"price":36010.0,"cost":135311298.0,"value":108030000.0,"returnPct":-20.16,"dayChangePct":-9.3,"sourceSheet":"블루3","sourceRow":34},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7466930005","stockName":"SOL 자동차TOP3플러스","prevQty":9000.0,"settleQty":9000.0,"orderQty":9000.0,"price":30145.0,"cost":279397115.0,"value":271305000.0,"returnPct":-2.89,"dayChangePct":-11.06,"sourceSheet":"블루3","sourceRow":35},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7469830004","stockName":"SOL 초단기채권액티브","prevQty":214000.0,"settleQty":214000.0,"orderQty":214000.0,"price":54010.0,"cost":11485325246.0,"value":11558140000.0,"returnPct":0.63,"dayChangePct":0.0,"sourceSheet":"블루3","sourceRow":36},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7475300000","stockName":"SOL 반도체전공정","prevQty":7000.0,"settleQty":7000.0,"orderQty":7000.0,"price":25070.0,"cost":173738140.0,"value":175490000.0,"returnPct":1.0,"dayChangePct":-11.22,"sourceSheet":"블루3","sourceRow":37},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7475310009","stockName":"SOL 반도체후공정","prevQty":4500.0,"settleQty":4500.0,"orderQty":4500.0,"price":30340.0,"cost":155702791.0,"value":136530000.0,"returnPct":-12.31,"dayChangePct":-10.63,"sourceSheet":"블루3","sourceRow":38},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7476260005","stockName":"HANARO 반도체핵심공정주도주","prevQty":11000.0,"settleQty":11000.0,"orderQty":11000.0,"price":15470.0,"cost":160313779.0,"value":170170000.0,"returnPct":6.14,"dayChangePct":-12.07,"sourceSheet":"블루3","sourceRow":39},{"fundKey":"blue3","fundLabel":"블루3","fundCode":"300085","fundName":"이지스블루ON일반사모투자신탁제3호","stockCode":"KR7494340003","stockName":"ACE 글로벌AI맞춤형반도체","prevQty":6100.0,"settleQty":6100.0,"orderQty":6100.0,"price":27720.0,"cost":164909761.0,"value":169092000.0,"returnPct":2.53,"dayChangePct":-6.8,"sourceSheet":"블루3","sourceRow":40}],"mpRows":[{"sourceRow":7,"no":1.0,"sector":"테크","detail":"반도체","stockName":"RISE 네트워크인프라","targetPct":0.13,"memo":""},{"sourceRow":8,"no":2.0,"sector":"테크","detail":"중국 테크","stockName":"TIME 차이나AI테크액티브","targetPct":0.03,"memo":""},{"sourceRow":9,"no":3.0,"sector":"테크","detail":"장비","stockName":"싸이맥스","targetPct":0.043,"memo":""},{"sourceRow":10,"no":4.0,"sector":"테크","detail":"설계","stockName":"에이직랜드","targetPct":0.033,"memo":""},{"sourceRow":11,"no":5.0,"sector":"테크","detail":"기판","stockName":"대덕전자","targetPct":0.02,"memo":""},{"sourceRow":12,"no":6.0,"sector":"테크","detail":"파운드리","stockName":"DB하이텍","targetPct":0.02,"memo":""},{"sourceRow":13,"no":7.0,"sector":"테크","detail":"SW","stockName":"NAVER","targetPct":0.025,"memo":""},{"sourceRow":14,"no":8.0,"sector":"테크","detail":"반도체","stockName":"ACE 글로벌AI맞춤형반도체","targetPct":0.02,"memo":""},{"sourceRow":15,"no":9.0,"sector":"테크","detail":"반도체","stockName":"HANARO 미국AI메모리반도체TOP4+","targetPct":0.021,"memo":""},{"sourceRow":16,"no":10.0,"sector":"테크","detail":"반도체","stockName":"HANARO 반도체핵심공정주도주","targetPct":0.02,"memo":""},{"sourceRow":17,"no":11.0,"sector":"테크","detail":"반도체","stockName":"RISE 삼성전자단일종목레버리지","targetPct":0.027,"memo":""},{"sourceRow":18,"no":12.0,"sector":"테크","detail":"반도체","stockName":"SOL 반도체전공정","targetPct":0.021,"memo":""},{"sourceRow":19,"no":13.0,"sector":"테크","detail":"반도체","stockName":"SOL 반도체후공정","targetPct":0.016,"memo":""},{"sourceRow":20,"no":14.0,"sector":"테크","detail":"반도체","stockName":"제주반도체","targetPct":0.015,"memo":""},{"sourceRow":21,"no":15.0,"sector":"테크","detail":"반도체","stockName":"LG이노텍","targetPct":0.025,"memo":""},{"sourceRow":22,"no":16.0,"sector":"테크","detail":"MLCC","stockName":"삼성전기우","targetPct":null,"memo":""},{"sourceRow":24,"no":1.0,"sector":"금융","detail":"보험","stockName":"KODEX 보험","targetPct":0.035,"memo":""},{"sourceRow":28,"no":1.0,"sector":"헬스케어","detail":"바이오","stockName":"TIGER 기술이전바이오액티브","targetPct":0.019,"memo":""},{"sourceRow":29,"no":2.0,"sector":"헬스케어","detail":"바이오","stockName":"큐라클","targetPct":0.027,"memo":""},{"sourceRow":30,"no":3.0,"sector":"헬스케어","detail":"바이오","stockName":"앱클론","targetPct":0.017,"memo":""},{"sourceRow":31,"no":4.0,"sector":"헬스케어","detail":"바이오","stockName":"디앤디파마텍","targetPct":0.015,"memo":""},{"sourceRow":35,"no":1.0,"sector":"방산/조선","detail":"로봇","stockName":"TIGER 코리아휴머노이드로봇산업","targetPct":0.039,"memo":""},{"sourceRow":43,"no":1.0,"sector":"에너지","detail":"원전","stockName":"두산에너빌리티","targetPct":0.042,"memo":""},{"sourceRow":44,"no":2.0,"sector":"에너지","detail":"전력기기","stockName":"TIGER 코리아AI전력기기TOP3플러스","targetPct":0.026,"memo":""},{"sourceRow":45,"no":3.0,"sector":"에너지","detail":"신재생","stockName":"PLUS 태양광&ESS","targetPct":0.023,"memo":""},{"sourceRow":48,"no":1.0,"sector":"산업재","detail":"운송","stockName":"SOL 자동차TOP3플러스","targetPct":0.03,"memo":""},{"sourceRow":49,"no":2.0,"sector":"산업재","detail":"건설","stockName":"아이에스동서","targetPct":0.017,"memo":""},{"sourceRow":50,"no":3.0,"sector":"산업재","detail":"건설","stockName":"TIGER 200 건설","targetPct":0.018,"memo":""},{"sourceRow":53,"no":1.0,"sector":"소비재","detail":"소비재","stockName":"파라다이스","targetPct":0.024,"memo":""},{"sourceRow":57,"no":1.0,"sector":"지주","detail":"지주","stockName":"LG","targetPct":0.021,"memo":""},{"sourceRow":58,"no":2.0,"sector":"지주","detail":"우선주","stockName":"TIGER 우선주","targetPct":0.031,"memo":""},{"sourceRow":62,"no":1.0,"sector":"원자재","detail":"원자재","stockName":"제이에스링크","targetPct":0.021,"memo":""},{"sourceRow":63,"no":2.0,"sector":"원자재","detail":"원유","stockName":"KODEX WTI원유선물인버스(H)","targetPct":0.028,"memo":""},{"sourceRow":68,"no":1.0,"sector":"지수","detail":"한국","stockName":"KODEX 코스닥150레버리지","targetPct":0.06,"memo":""},{"sourceRow":73,"no":1.0,"sector":"기타","detail":"리츠","stockName":"펩트론","targetPct":null,"memo":""},{"sourceRow":74,"no":2.0,"sector":"기타","detail":"건설","stockName":"이지스레지던스리츠","targetPct":null,"memo":""},{"sourceRow":75,"no":3.0,"sector":"기타","detail":"바이오","stockName":"금호건설","targetPct":null,"memo":""},{"sourceRow":76,"no":4.0,"sector":"기타","detail":"기계","stockName":"현대엘리베이터","targetPct":null,"memo":""}],"stockNames":["RISE 네트워크인프라","펩트론","KODEX 코스닥150레버리지","싸이맥스","TIME 차이나AI테크액티브","TIGER 코리아AI전력기기TOP3플러스","SOL 자동차TOP3플러스","TIGER 우선주","두산에너빌리티","TIGER 코리아휴머노이드로봇산업","에이직랜드","제주반도체","KODEX WTI원유선물인버스(H)","큐라클","LG이노텍","삼성전기우","HANARO 미국AI메모리반도체TOP4+","DB하이텍","SK스퀘어","LG","SOL 반도체전공정","HANARO 반도체핵심공정주도주","제이에스링크","ACE 글로벌AI맞춤형반도체","아이에스동서","TIGER 기술이전바이오액티브","TIGER 200 건설","대덕전자","SOL 반도체후공정","두산","디앤디파마텍","PLUS 태양광&ESS","앱클론","RF머트리얼즈","아이엠바이오로직스","메쥬","리센스메디컬","코스모로보틱스","폴레드","RISE 삼성전자단일종목레버리지","파라다이스","NAVER","KODEX 보험","금호건설","현대엘리베이터","이지스레지던스리츠","SOL 초단기채권액티브"],"mpStockCount":34.0};
+    const STORAGE_KEY = `mp-dashboard:${DATA.workbook}:${DATA.workbookModifiedAt}:${DATA.workbookSize}`;
+    const FUND_KEYS = DATA.funds.map((fund) => fund.key);
+    const CHART_COLORS = ["#1f6f8f", "#7a9f35", "#c46a2b", "#6f5aa7", "#d29a22", "#4c8b77", "#b75b7a", "#5a78a7", "#9a7b3f", "#668c99", "#8b6b58", "#537a52"];
+    const state = {
+      rows: [],
+      computed: [],
+      search: "",
+      status: "all",
+      selectedSector: "all",
+      selectedDetail: "all",
+      selectedFund: "income2",
+      sectorFund: "income2",
+      viewMode: "simple",
+    };
+
+    const SECTOR_EXCLUDE = new Set(["기타", "미분류", "미분류(기타)"]);
+
+    const byName = new Map();
+    const fundByKey = new Map(DATA.funds.map((fund) => [fund.key, fund]));
+
+    DATA.holdings.forEach((holding) => {
+      const name = normalizeName(holding.stockName);
+      if (!name) return;
+      if (!byName.has(name)) byName.set(name, []);
+      byName.get(name).push(holding);
+    });
+
+    document.addEventListener("DOMContentLoaded", init);
+
+    function init() {
+      document.getElementById("workbookMeta").textContent = `${DATA.workbook} | 생성 ${DATA.generatedAt}`;
+      document.getElementById("sourceMeta").textContent = DATA.sourceDate ? `원천 ${DATA.sourceDate}` : "";
+      buildDatalist();
+      loadRows();
+      bindEvents();
+      bindCalculator();
+      render();
+    }
+
+    function bindCalculator() {
+      const stockInput = document.getElementById("calcStock");
+      const weightInput = document.getElementById("calcWeight");
+      const recompute = () => updateCalculator(stockInput.value, weightInput.value);
+      stockInput.addEventListener("input", recompute);
+      weightInput.addEventListener("input", recompute);
+    }
+
+    function parseCalcPct(value) {
+      const text = (value || "").toString().trim().replace("%", "");
+      if (!text) return 0;
+      const n = Number(text);
+      if (!Number.isFinite(n)) return 0;
+      return n / 100;
+    }
+
+    function updateCalculator(stockName, weightStr) {
+      const name = normalizeName(stockName);
+      const weight = parseCalcPct(weightStr);
+      const holdings = byName.get(name) || [];
+      const price = firstNumber(holdings.map((item) => item.price));
+
+      document.getElementById("calcPrice").textContent =
+        price ? formatNumber(price, 0) + "원" : "-";
+
+      DATA.funds.forEach((fund) => {
+        const el = document.getElementById("calcFund_" + fund.key);
+        if (!el) return;
+        if (!name || !price || !weight || !fund.stockTargetEok) {
+          el.textContent = "-";
+          return;
+        }
+        const shares = Math.round(fund.stockTargetEok * 1e8 * weight / price);
+        el.textContent = formatNumber(shares, 0) + "주";
+      });
+    }
+
+    function bindEvents() {
+      document.getElementById("addRowBtn").addEventListener("click", addEmptyRow);
+
+      document.getElementById("saveBtn").addEventListener("click", saveRows);
+      document.getElementById("resetBtn").addEventListener("click", resetRows);
+      document.getElementById("exportBtn").addEventListener("click", exportCsv);
+      document.getElementById("clearFiltersBtn").addEventListener("click", clearFilters);
+      document.getElementById("searchInput").addEventListener("input", (event) => {
+        state.search = event.target.value.trim().toLowerCase();
+        applyFilters();
+        renderFilterChips();
+      });
+      document.getElementById("statusFilter").addEventListener("change", (event) => {
+        state.status = event.target.value;
+        applyFilters();
+        renderFilterChips();
+      });
+      document.getElementById("fundSelect").addEventListener("change", (event) => {
+        state.selectedFund = event.target.value;
+        render();
+      });
+      document.getElementById("viewModeSelect").addEventListener("change", (event) => {
+        state.viewMode = event.target.value;
+        applyViewMode();
+      });
+      document.querySelectorAll("#sectorFundTabs .fund-tab").forEach((tab) => {
+        tab.addEventListener("click", () => {
+          state.sectorFund = tab.dataset.fund;
+          renderSectorTable();
+        });
+      });
+      document.querySelectorAll("#mpFundTabs .fund-tab").forEach((tab) => {
+        tab.addEventListener("click", () => {
+          state.selectedFund = tab.dataset.fund;
+          render();
+        });
+      });
+      document.getElementById("sectorSelect").addEventListener("change", (event) => {
+        state.selectedSector = event.target.value;
+        state.selectedDetail = "all";
+        render();
+      });
+      document.getElementById("detailSelect").addEventListener("change", (event) => {
+        state.selectedDetail = event.target.value;
+        applyFilters();
+        renderFilterChips();
+      });
+      document.getElementById("sectorFundSelect").addEventListener("change", (event) => {
+        state.sectorFund = event.target.value;
+        renderSectorTable();
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+          event.preventDefault();
+          saveRows();
+        }
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
+          event.preventDefault();
+          addEmptyRow();
+        }
+        if (event.key === "Escape" && document.activeElement === document.getElementById("searchInput")) {
+          state.search = "";
+          document.getElementById("searchInput").value = "";
+          applyFilters();
+          renderFilterChips();
+        }
+      });
+    }
+
+    function addEmptyRow() {
+      state.rows.push({
+        sourceRow: null,
+        no: null,
+        sector: state.selectedSector !== "all" ? state.selectedSector : "",
+        detail: state.selectedDetail !== "all" ? state.selectedDetail : "",
+        stockName: "",
+        targetPct: 0,
+        memo: "",
+      });
+      render();
+      const inputs = document.querySelectorAll(".name-input");
+      if (inputs.length) inputs[inputs.length - 1].focus();
+    }
+
+    function clearFilters() {
+      state.search = "";
+      state.status = "all";
+      state.selectedSector = "all";
+      state.selectedDetail = "all";
+      document.getElementById("searchInput").value = "";
+      document.getElementById("statusFilter").value = "all";
+      render();
+    }
+
+    function loadRows() {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        try {
+          state.rows = JSON.parse(stored);
+          document.getElementById("saveMeta").textContent = "저장본 적용";
+          return;
+        } catch (error) {
+          localStorage.removeItem(STORAGE_KEY);
+        }
+      }
+      state.rows = DATA.mpRows.map((row) => ({ ...row }));
+    }
+
+    function saveRows() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state.rows));
+      const meta = document.getElementById("saveMeta");
+      meta.textContent = `✓ 저장 ${new Date().toLocaleTimeString("ko-KR", { hour12: false })}`;
+      meta.style.color = "var(--ok)";
+      meta.style.fontWeight = "700";
+      setTimeout(() => { meta.style.color = ""; meta.style.fontWeight = ""; }, 1500);
+    }
+
+    function resetRows() {
+      if (!confirm("브라우저 저장본을 지우고 엑셀 기준으로 되돌릴까요?")) return;
+      localStorage.removeItem(STORAGE_KEY);
+      state.rows = DATA.mpRows.map((row) => ({ ...row }));
+      document.getElementById("saveMeta").textContent = "";
+      render();
+    }
+
+    function buildDatalist() {
+      const list = document.getElementById("stockList");
+      list.innerHTML = "";
+      DATA.stockNames.forEach((name) => {
+        const option = document.createElement("option");
+        option.value = name;
+        list.appendChild(option);
+      });
+    }
+
+    function render() {
+      computeRows();
+      populateInputDatalists();
+      populateFilterOptions();
+      renderSectorNav();
+      renderMainTable();
+      renderSectorTable();
+      renderValidation();
+      renderMetrics();
+      renderFilterChips();
+      applyViewMode();
+      applyFilters();
+    }
+
+    function applyViewMode() {
+      const detail = state.viewMode === "detail";
+      document.querySelectorAll("#mpTable .col-detail").forEach((el) => {
+        el.classList.toggle("col-hidden", !detail);
+      });
+    }
+
+    function renderSectorNav() {
+      const sectors = getSectorStats();
+      const nav = document.getElementById("sectorNav");
+      nav.innerHTML = "";
+      const eligible = state.computed.filter((r) => r.normalizedName && !SECTOR_EXCLUDE.has(r.sector || "미분류"));
+      const totalTarget = sum(eligible.map((r) => r.targetPct));
+      const totalCurrent = sum(eligible.map((r) => r.fundValues[state.selectedFund].weight || 0));
+      nav.appendChild(sectorButton("all", "전체", eligible.length, totalTarget, totalCurrent));
+      sectors.forEach((s) => {
+        const cur = s.fundWeights[state.selectedFund] || 0;
+        nav.appendChild(sectorButton(s.sector, s.sector, s.count, s.targetPct, cur));
+      });
+      document.getElementById("sectorCount").textContent = `${sectors.length}개`;
+      renderSectorStocks();
+    }
+
+    function sectorButton(value, label, count, targetPct, currentPct) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "sector-button" + (state.selectedSector === value ? " active" : "");
+
+      const row1 = document.createElement("div");
+      row1.className = "sector-row";
+      const name = document.createElement("span");
+      name.className = "sector-name";
+      name.textContent = label;
+      const target = document.createElement("span");
+      target.className = "sector-target";
+      target.textContent = formatPct(targetPct);
+      row1.appendChild(name);
+      row1.appendChild(target);
+
+      const row2 = document.createElement("div");
+      row2.className = "sector-row";
+      const countEl = document.createElement("span");
+      countEl.className = "sector-count";
+      countEl.textContent = `${formatNumber(count, 0)}종목`;
+      const gap = (targetPct || 0) - (currentPct || 0);
+      const gapCls = Math.abs(gap) < 0.0005 ? "gap-zero" : (gap > 0 ? "gap-pos" : "gap-neg");
+      const gapEl = document.createElement("span");
+      gapEl.className = `sector-gap ${gapCls}`;
+      gapEl.textContent = (gap >= 0 ? "+" : "") + formatPct(gap);
+      row2.appendChild(countEl);
+      row2.appendChild(gapEl);
+
+      button.appendChild(row1);
+      button.appendChild(row2);
+      button.addEventListener("click", () => {
+        state.selectedSector = state.selectedSector === value ? "all" : value;
+        state.selectedDetail = "all";
+        render();
+      });
+      return button;
+    }
+
+    function renderSectorStocks() {
+      const list = document.getElementById("sectorStockList");
+      const title = document.getElementById("sectorStockTitle");
+      const rows = state.computed
+        .filter((row) => state.selectedSector === "all" || (row.sector || "미분류") === state.selectedSector)
+        .filter((row) => row.normalizedName)
+        .sort((a, b) => b.targetPct - a.targetPct);
+      title.textContent = state.selectedSector === "all"
+        ? `전체 종목 (${rows.length})`
+        : `${state.selectedSector} (${rows.length})`;
+      list.innerHTML = "";
+      if (!rows.length) {
+        const empty = document.createElement("li");
+        empty.innerHTML = '<span class="muted">없음</span><span></span>';
+        list.appendChild(empty);
+        return;
+      }
+      rows.forEach((row) => {
+        const fund = row.fundValues[state.selectedFund];
+        const gap = (row.targetPct || 0) - (fund.weight || 0);
+        const li = document.createElement("li");
+        const name = document.createElement("span");
+        name.className = "stock-name";
+        name.title = row.stockName;
+        name.textContent = row.stockName;
+        const meta = document.createElement("span");
+        meta.className = "stock-meta";
+        const gapCls = Math.abs(gap) < 0.0005 ? "" : (gap > 0 ? " gap-pos" : " gap-neg");
+        meta.innerHTML = `<strong>${formatPct(row.targetPct)}</strong> <span class="muted${gapCls}">${gap >= 0 ? "+" : ""}${formatPct(gap)}</span>`;
+        li.appendChild(name);
+        li.appendChild(meta);
+        list.appendChild(li);
+      });
+    }
+
+    function populateInputDatalists() {
+      const sectorSet = new Set();
+      const detailSet = new Set();
+      state.computed.forEach((r) => {
+        if (r.sector && !SECTOR_EXCLUDE.has(r.sector)) sectorSet.add(r.sector);
+        if (r.detail) detailSet.add(r.detail);
+      });
+      fillDatalist("sectorList", [...sectorSet].sort((a, b) => a.localeCompare(b, "ko")));
+      fillDatalist("detailList", [...detailSet].sort((a, b) => a.localeCompare(b, "ko")));
+    }
+
+    function fillDatalist(id, values) {
+      const list = document.getElementById(id);
+      list.innerHTML = "";
+      values.forEach((v) => {
+        const opt = document.createElement("option");
+        opt.value = v;
+        list.appendChild(opt);
+      });
+    }
+
+    function populateFilterOptions() {
+      const sectorSelect = document.getElementById("sectorSelect");
+      const detailSelect = document.getElementById("detailSelect");
+
+      const sectorSet = new Set();
+      state.computed.forEach((row) => {
+        const sec = row.sector || "";
+        if (sec && !SECTOR_EXCLUDE.has(sec)) sectorSet.add(sec);
+      });
+      const sectors = [...sectorSet].sort((a, b) => a.localeCompare(b, "ko"));
+
+      const detailSet = new Set();
+      state.computed.forEach((row) => {
+        if (state.selectedSector === "all" || row.sector === state.selectedSector) {
+          if (row.detail) detailSet.add(row.detail);
+        }
+      });
+      const details = [...detailSet].sort((a, b) => a.localeCompare(b, "ko"));
+
+      renderSelectOptions(sectorSelect, sectors, state.selectedSector, "전체 섹터");
+      renderSelectOptions(detailSelect, details, state.selectedDetail, "전체 세부");
+    }
+
+    function renderSelectOptions(select, values, current, allLabel) {
+      const previous = current;
+      select.innerHTML = "";
+      const allOpt = document.createElement("option");
+      allOpt.value = "all";
+      allOpt.textContent = allLabel;
+      select.appendChild(allOpt);
+      values.forEach((value) => {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = value;
+        select.appendChild(opt);
+      });
+      select.value = values.includes(previous) || previous === "all" ? previous : "all";
+    }
+
+    function renderFilterChips() {
+      const wrap = document.getElementById("filterChips");
+      wrap.innerHTML = "";
+      const chips = [];
+      if (state.selectedSector !== "all") chips.push({ label: `섹터: ${state.selectedSector}`, clear: () => { state.selectedSector = "all"; state.selectedDetail = "all"; render(); } });
+      if (state.selectedDetail !== "all") chips.push({ label: `세부: ${state.selectedDetail}`, clear: () => { state.selectedDetail = "all"; render(); } });
+      if (state.status !== "all") chips.push({ label: `상태: ${state.status}`, clear: () => { state.status = "all"; document.getElementById("statusFilter").value = "all"; render(); } });
+      if (state.search) chips.push({ label: `검색: ${state.search}`, clear: () => { state.search = ""; document.getElementById("searchInput").value = ""; render(); } });
+      chips.forEach((chip) => {
+        const el = document.createElement("span");
+        el.className = "chip";
+        const label = document.createElement("span");
+        label.textContent = chip.label;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "×";
+        btn.addEventListener("click", chip.clear);
+        el.appendChild(label);
+        el.appendChild(btn);
+        wrap.appendChild(el);
+      });
+    }
+
+    function computeRows() {
+      state.computed = state.rows.map((row, index) => {
+        const name = normalizeName(row.stockName);
+        const holdings = byName.get(name) || [];
+        const price = firstNumber(holdings.map((item) => item.price));
+        const targetPct = normalizePct(row.targetPct);
+        const fundValues = {};
+
+        FUND_KEYS.forEach((key) => {
+          const fund = fundByKey.get(key);
+          const fundHoldings = holdings.filter((item) => item.fundKey === key);
+          const valueEok = sum(fundHoldings.map((item) => item.value)) / 100000000;
+          const weight = fund && fund.stockTargetEok ? valueEok / fund.stockTargetEok : 0;
+          const gapQty = price && fund && fund.stockTargetEok
+            ? ((targetPct - weight) * fund.stockTargetEok * 100000000) / price
+            : null;
+          fundValues[key] = {
+            valueEok,
+            weight,
+            gapQty,
+            returnPct: firstNumber(fundHoldings.map((item) => item.returnPct)),
+          };
+        });
+
+        let status = "ok";
+        let statusLabel = "OK";
+        if (name && holdings.length === 0) {
+          status = "missing";
+          statusLabel = "원천누락";
+        } else if (name && !price) {
+          status = "price";
+          statusLabel = "현재가누락";
+        }
+
+        return {
+          ...row,
+          index,
+          normalizedName: name,
+          targetPct,
+          holdings,
+          price,
+          fundValues,
+          status,
+          statusLabel,
+        };
+      });
+    }
+
+    function getSectorStats(options = {}) {
+      const { excludeOther = true } = options;
+      const grouped = new Map();
+      state.computed.forEach((row) => {
+        const sector = row.sector || "미분류";
+        if (excludeOther && SECTOR_EXCLUDE.has(sector)) return;
+        if (!grouped.has(sector)) {
+          grouped.set(sector, {
+            sector,
+            count: 0,
+            targetPct: 0,
+            rows: [],
+            fundWeights: Object.fromEntries(FUND_KEYS.map((key) => [key, 0])),
+          });
+        }
+        const bucket = grouped.get(sector);
+        bucket.count += row.normalizedName ? 1 : 0;
+        bucket.targetPct += row.targetPct || 0;
+        bucket.rows.push(row);
+        FUND_KEYS.forEach((key) => {
+          bucket.fundWeights[key] += row.fundValues[key].weight || 0;
+        });
+      });
+      return [...grouped.values()].sort((a, b) => b.targetPct - a.targetPct || a.sector.localeCompare(b.sector, "ko"));
+    }
+
+    function renderMainTable() {
+      const body = document.getElementById("mpBody");
+      body.innerHTML = "";
+      const fragment = document.createDocumentFragment();
+      const selectedFund = fundByKey.get(state.selectedFund) || DATA.funds[0];
+
+      const titleParts = ["MP 입력"];
+      if (state.selectedSector !== "all") titleParts.push(state.selectedSector);
+      if (state.selectedDetail !== "all") titleParts.push(state.selectedDetail);
+      document.getElementById("mpTitle").textContent = titleParts.join(" › ");
+      document.querySelectorAll("#mpFundTabs .fund-tab").forEach((tab) => {
+        tab.classList.toggle("active", tab.dataset.fund === selectedFund.key);
+      });
+      document.getElementById("fundValueHead").textContent = "평가";
+      document.getElementById("fundWeightHead").textContent = "비중";
+      document.getElementById("fundDiffHead").textContent = "차이";
+      document.getElementById("fundQtyHead").textContent = "조정수량";
+      document.getElementById("fundReturnHead").textContent = "수익률";
+
+      state.computed.forEach((row) => {
+        const tr = document.createElement("tr");
+        tr.dataset.index = row.index;
+        tr.dataset.status = row.status;
+        tr.dataset.sector = row.sector || "미분류";
+        tr.dataset.detail = row.detail || "";
+        tr.dataset.search = `${row.sector} ${row.detail} ${row.stockName}`.toLowerCase();
+
+        const fund = row.fundValues[selectedFund.key];
+        const diff = (row.targetPct || 0) - (fund.weight || 0);
+        const absDiff = Math.abs(diff);
+        if (row.normalizedName && absDiff > 0.01) tr.classList.add("row-bad");
+
+        const sectorTd = inputCell(row.index, "sector", row.sector, "editable", "sectorList");
+        sectorTd.classList.add("col-sector");
+        tr.appendChild(sectorTd);
+        const detailTd = inputCell(row.index, "detail", row.detail, "editable", "detailList");
+        detailTd.classList.add("col-detail-input");
+        tr.appendChild(detailTd);
+        const nameTd = inputCell(row.index, "stockName", row.stockName, "editable name-input", "stockList");
+        nameTd.classList.add("col-stockname");
+        const nameInput = nameTd.querySelector("input");
+        if (nameInput && row.stockName) nameInput.title = row.stockName;
+        tr.appendChild(nameTd);
+        tr.appendChild(targetCell(row.index, row.targetPct));
+        tr.appendChild(numberCell(row.price, "price"));
+        tr.appendChild(statusCell(row.status, row.statusLabel));
+
+        const valueCell = numberCell(fund.valueEok, "eok");
+        valueCell.classList.add("col-detail");
+        tr.appendChild(valueCell);
+        tr.appendChild(numberCell(fund.weight, "pct"));
+        const diffTd = diffCell(diff);
+        tr.appendChild(diffTd);
+        tr.appendChild(gapCell(fund.gapQty, "qty"));
+        const retCell = numberCell(fund.returnPct, "ret");
+        retCell.classList.add("col-detail");
+        tr.appendChild(retCell);
+
+        const deleteTd = document.createElement("td");
+        deleteTd.className = "center";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "delete-row danger";
+        button.textContent = "X";
+        button.title = "행 삭제";
+        button.addEventListener("click", () => {
+          if (row.stockName && !confirm(`'${row.stockName}' 행을 삭제할까요?`)) return;
+          state.rows.splice(row.index, 1);
+          render();
+        });
+        deleteTd.appendChild(button);
+        tr.appendChild(deleteTd);
+        fragment.appendChild(tr);
+      });
+
+      body.appendChild(fragment);
+      body.querySelectorAll("input[data-field]").forEach((input) => {
+        input.addEventListener("input", storeRowFromInput);
+        input.addEventListener("change", commitRowInput);
+      });
+    }
+
+    function gapCell(value, type) {
+      const td = numberCell(value, type);
+      if (value === null || value === undefined || Number.isNaN(value)) return td;
+      const num = Number(value);
+      if (Math.abs(num) < (type === "pct" ? 0.0005 : 1)) td.classList.add("gap-zero");
+      else if (num > 0) td.classList.add("gap-pos");
+      else td.classList.add("gap-neg");
+      return td;
+    }
+
+    function diffCell(value) {
+      const td = document.createElement("td");
+      td.className = "number col-diff";
+      if (value === null || value === undefined || Number.isNaN(value)) return td;
+      const num = Number(value);
+      const cls = Math.abs(num) < 0.0005 ? "gap-zero" : (num > 0 ? "gap-pos" : "gap-neg");
+      const wrap = document.createElement("div");
+      wrap.className = "diff-cell";
+      const text = document.createElement("div");
+      text.className = `diff-text ${cls}`;
+      text.textContent = formatPct(num);
+      wrap.appendChild(text);
+      const MAX = 0.03;
+      const pct = Math.min(Math.abs(num) / MAX, 1) * 50;
+      const bar = document.createElement("div");
+      bar.className = "diff-bar";
+      if (Math.abs(num) >= 0.0005) {
+        const fill = document.createElement("div");
+        fill.className = `diff-bar-fill ${num > 0 ? "pos" : "neg"}`;
+        fill.style.width = `${pct}%`;
+        bar.appendChild(fill);
+      }
+      wrap.appendChild(bar);
+      td.appendChild(wrap);
+      return td;
+    }
+
+    function inputCell(index, field, value, className, listId) {
+      const td = document.createElement("td");
+      const input = document.createElement("input");
+      input.value = value || "";
+      input.className = className;
+      input.dataset.index = index;
+      input.dataset.field = field;
+      if (listId) input.setAttribute("list", listId);
+      td.appendChild(input);
+      return td;
+    }
+
+    function targetCell(index, value) {
+      const td = document.createElement("td");
+      const input = document.createElement("input");
+      input.value = formatPctInput(value);
+      input.className = "editable target-input";
+      input.dataset.index = index;
+      input.dataset.field = "targetPct";
+      td.appendChild(input);
+      return td;
+    }
+
+    function statusCell(status, label) {
+      const td = document.createElement("td");
+      td.className = "center";
+      if (status === "ok") return td;
+      const badge = document.createElement("span");
+      badge.className = `badge ${status === "price" ? "warn" : "bad"}`;
+      badge.textContent = label;
+      td.appendChild(badge);
+      return td;
+    }
+
+    function numberCell(value, type) {
+      const td = document.createElement("td");
+      td.className = "number";
+      if (value === null || value === undefined || Number.isNaN(value)) {
+        td.textContent = "";
+      } else if (type === "pct") {
+        td.textContent = formatPct(value);
+      } else if (type === "ret") {
+        td.textContent = formatNumber(value, 2) + "%";
+      } else if (type === "qty") {
+        td.textContent = formatNumber(value, 0);
+      } else if (type === "eok") {
+        td.textContent = formatNumber(value, 2);
+      } else {
+        td.textContent = formatNumber(value, 0);
+      }
+      return td;
+    }
+
+    function storeRowFromInput(event) {
+      const input = event.currentTarget;
+      const index = Number(input.dataset.index);
+      const field = input.dataset.field;
+      if (!state.rows[index]) return;
+      if (field === "targetPct") {
+        state.rows[index][field] = parsePct(input.value);
+      } else {
+        state.rows[index][field] = input.value;
+      }
+    }
+
+    function commitRowInput(event) {
+      storeRowFromInput(event);
+      render();
+    }
+
+    function renderSectorTable() {
+      const grouped = getSectorStats();
+      const fund = fundByKey.get(state.sectorFund) || DATA.funds[0];
+      const body = document.querySelector("#sectorTable tbody");
+      body.innerHTML = "";
+      document.getElementById("sectorFundHead").textContent = fund.label;
+      document.getElementById("sectorSummaryNote").textContent =
+        state.selectedSector === "all" ? "" : `${state.selectedSector} 강조`;
+
+      document.querySelectorAll("#sectorFundTabs .fund-tab").forEach((tab) => {
+        tab.classList.toggle("active", tab.dataset.fund === fund.key);
+      });
+
+      const sorted = [...grouped].sort((a, b) => (b.fundWeights[fund.key] || 0) - (a.fundWeights[fund.key] || 0));
+
+      sorted.forEach((data) => {
+        const tr = document.createElement("tr");
+        if (state.selectedSector === data.sector) tr.style.background = "#e8f4f8";
+        const sectorTd = document.createElement("td");
+        sectorTd.textContent = data.sector;
+        sectorTd.style.cursor = "pointer";
+        sectorTd.addEventListener("click", () => {
+          state.selectedSector = state.selectedSector === data.sector ? "all" : data.sector;
+          state.selectedDetail = "all";
+          render();
+        });
+        tr.appendChild(sectorTd);
+        tr.appendChild(numberCell(data.targetPct, "pct"));
+        tr.appendChild(numberCell(data.fundWeights[fund.key], "pct"));
+        const diff = (data.fundWeights[fund.key] || 0) - data.targetPct;
+        tr.appendChild(gapCell(-diff, "pct"));
+        body.appendChild(tr);
+      });
+
+      renderSectorPie(sorted, fund);
+    }
+
+    function renderSectorPie(grouped, fund) {
+      const pie = document.getElementById("sectorPie");
+      const legend = document.getElementById("sectorLegend");
+      const caption = document.getElementById("sectorPieCaption");
+      const centerLabel = document.getElementById("pieCenterLabel");
+      const centerValue = document.getElementById("pieCenterValue");
+      const labelsBox = document.getElementById("pieLabels");
+      const slices = grouped
+        .map((item, index) => ({
+          sector: item.sector,
+          value: Math.max(item.fundWeights[fund.key] || 0, 0),
+          target: item.targetPct,
+          color: CHART_COLORS[index % CHART_COLORS.length],
+        }))
+        .filter((item) => item.value > 0);
+      const total = sum(slices.map((item) => item.value));
+
+      centerLabel.textContent = fund.label;
+      centerValue.textContent = formatPct(total);
+      labelsBox.innerHTML = "";
+
+      if (!total) {
+        pie.style.background = "#d7dde6";
+        caption.textContent = `${fund.label} 섹터 비중 없음`;
+        legend.innerHTML = "";
+        return;
+      }
+
+      let cursor = 0;
+      const segments = slices.map((slice) => {
+        const start = cursor;
+        const end = cursor + (slice.value / total) * 100;
+        cursor = end;
+        return `${slice.color} ${start.toFixed(4)}% ${end.toFixed(4)}%`;
+      });
+      pie.style.background = `conic-gradient(${segments.join(", ")})`;
+      caption.textContent = `${fund.label} 주식가능액 대비 주식비중`;
+
+      // Place sector name labels at the geometric center of each slice's visible ring area.
+      // Donut visible ring is between ~25% (hole) and 50% (outer) → midpoint 37.5%.
+      const LABEL_RADIUS = 37.5;
+      const MIN_SHARE = 0.04;
+      const MIN_DEG_PER_CHAR = 6.5;  // estimate of arc deg required per Korean char at this radius/font
+      cursor = 0;
+      slices.forEach((slice) => {
+        const share = slice.value / total;
+        const startAngle = cursor * 360;
+        const endAngle = (cursor + share) * 360;
+        cursor += share;
+        const arcDeg = share * 360;
+        if (share < MIN_SHARE) return;
+        if (slice.sector.length * MIN_DEG_PER_CHAR > arcDeg) return;
+        const midAngle = (startAngle + endAngle) / 2;
+        const rad = (midAngle - 90) * Math.PI / 180;
+        const x = 50 + Math.cos(rad) * LABEL_RADIUS;
+        const y = 50 + Math.sin(rad) * LABEL_RADIUS;
+        const label = document.createElement("div");
+        label.className = "pie-label";
+        label.textContent = slice.sector;
+        label.style.left = x + "%";
+        label.style.top = y + "%";
+        labelsBox.appendChild(label);
+      });
+
+      legend.innerHTML = "";
+      slices.forEach((slice) => {
+        const item = document.createElement("div");
+        item.className = "legend-item" + (state.selectedSector === slice.sector ? " active" : "");
+        item.title = `${slice.sector} 필터`;
+        item.innerHTML = '<span class="legend-swatch"></span><span class="legend-label"></span><span class="muted"></span>';
+        item.querySelector(".legend-swatch").style.background = slice.color;
+        item.querySelector(".legend-label").textContent = slice.sector;
+        const gap = slice.value - slice.target;
+        const gapStr = gap >= 0 ? `+${formatPct(gap)}` : formatPct(gap);
+        item.querySelector(".muted").innerHTML =
+          `<strong style="color:var(--text);">${formatPct(slice.value)}</strong> <span class="${gap > 0.0005 ? 'gap-neg' : gap < -0.0005 ? 'gap-pos' : ''}">(${gapStr})</span>`;
+        item.addEventListener("click", () => {
+          state.selectedSector = state.selectedSector === slice.sector ? "all" : slice.sector;
+          state.selectedDetail = "all";
+          render();
+        });
+        legend.appendChild(item);
+      });
+    }
+
+    function renderValidation() {
+      const selectedNames = new Set(state.computed.map((row) => row.normalizedName).filter(Boolean));
+      const sourceNames = [...byName.keys()];
+      const missing = state.computed.filter((row) => row.normalizedName && row.status === "missing");
+      const priceMissing = state.computed.filter((row) => row.normalizedName && row.status === "price");
+      const unlisted = sourceNames.filter((name) => !selectedNames.has(name));
+
+      renderList("missingList", missing, (row) => [row.stockName, row.sector || ""]);
+      renderList("priceList", priceMissing, (row) => [row.stockName, row.sector || ""]);
+      renderList("unlistedList", unlisted.slice(0, 80), (name) => {
+        const holdings = byName.get(name) || [];
+        const funds = [...new Set(holdings.map((item) => item.fundLabel))].join(", ");
+        return [name, funds];
+      });
+    }
+
+    function renderList(id, items, mapper) {
+      const list = document.getElementById(id);
+      list.innerHTML = "";
+      if (!items.length) {
+        const li = document.createElement("li");
+        li.innerHTML = '<span class="muted">없음</span><span></span>';
+        list.appendChild(li);
+        return;
+      }
+      items.forEach((item) => {
+        const [left, right] = mapper(item);
+        const li = document.createElement("li");
+        const l = document.createElement("span");
+        const r = document.createElement("span");
+        l.textContent = left;
+        r.textContent = right;
+        r.className = "muted";
+        li.appendChild(l);
+        li.appendChild(r);
+        list.appendChild(li);
+      });
+    }
+
+    function renderMetrics() {
+      const selectedNames = new Set(state.computed.map((row) => row.normalizedName).filter(Boolean));
+      const sourceNames = [...byName.keys()];
+      const missing = state.computed.filter((row) => row.normalizedName && row.status === "missing").length;
+      const priceMissing = state.computed.filter((row) => row.normalizedName && row.status === "price").length;
+      const unlisted = sourceNames.filter((name) => !selectedNames.has(name)).length;
+      const target = sum(state.computed.map((row) => row.targetPct));
+
+      const a3Count = DATA.mpStockCount;
+      document.getElementById("metricRows").textContent = (a3Count !== null && a3Count !== undefined)
+        ? formatNumber(a3Count, 0)
+        : formatNumber(state.computed.filter((row) => row.normalizedName).length, 0);
+      document.getElementById("metricTarget").textContent = formatPct(target);
+      document.getElementById("metricMissing").textContent = formatNumber(missing, 0);
+      document.getElementById("metricPriceMissing").textContent = formatNumber(priceMissing, 0);
+      document.getElementById("metricSourceNames").textContent = formatNumber(sourceNames.length, 0);
+      document.getElementById("metricUnlisted").textContent = formatNumber(unlisted, 0);
+
+      toggleMetricState("metricMissingBox", missing, "bad");
+      toggleMetricState("metricPriceBox", priceMissing, "warn");
+      toggleMetricState("metricUnlistedBox", unlisted, "warn");
+    }
+
+    function toggleMetricState(id, count, className) {
+      const node = document.getElementById(id);
+      node.classList.remove("bad", "warn");
+      if (count > 0) node.classList.add(className);
+    }
+
+    function applyFilters() {
+      let visible = 0;
+      let targetSum = 0;
+      let weightSum = 0;
+      let prevSector = null;
+      const fundKey = state.selectedFund;
+      document.querySelectorAll("#mpBody tr").forEach((tr) => {
+        const statusOk = state.status === "all" || tr.dataset.status === state.status;
+        const sectorOk = state.selectedSector === "all" || tr.dataset.sector === state.selectedSector;
+        const detailOk = state.selectedDetail === "all" || tr.dataset.detail === state.selectedDetail;
+        const searchOk = !state.search || tr.dataset.search.includes(state.search);
+        const show = statusOk && sectorOk && detailOk && searchOk;
+        tr.classList.toggle("hidden", !show);
+        if (show) {
+          visible += 1;
+          const sector = tr.dataset.sector;
+          tr.classList.toggle("same-sector", !!prevSector && sector === prevSector);
+          prevSector = sector;
+          const row = state.computed[Number(tr.dataset.index)];
+          if (row && row.normalizedName) {
+            targetSum += row.targetPct || 0;
+            weightSum += row.fundValues[fundKey].weight || 0;
+          }
+        } else {
+          tr.classList.remove("same-sector");
+        }
+      });
+      document.getElementById("visibleCount").textContent =
+        `보이는 행 ${visible} / ${state.rows.length} · 목표합 ${formatPct(targetSum)} · 현재합 ${formatPct(weightSum)}`;
+    }
+
+    function exportCsv() {
+      const headers = [
+        "섹터",
+        "세부",
+        "종목명",
+        "목표비중",
+        "현재가",
+        "상태",
+        "인컴2 평가",
+        "인컴2 비중",
+        "인컴2 차이",
+        "인컴2 조정수량",
+        "블루1 평가",
+        "블루1 비중",
+        "블루1 차이",
+        "블루1 조정수량",
+        "블루3 평가",
+        "블루3 비중",
+        "블루3 차이",
+        "블루3 조정수량",
+      ];
+      const lines = [headers];
+      state.computed.forEach((row) => {
+        const diff = (key) => (row.targetPct || 0) - (row.fundValues[key].weight || 0);
+        lines.push([
+          row.sector,
+          row.detail,
+          row.stockName,
+          row.targetPct,
+          row.price || "",
+          row.statusLabel,
+          row.fundValues.income2.valueEok,
+          row.fundValues.income2.weight,
+          diff("income2"),
+          row.fundValues.income2.gapQty,
+          row.fundValues.blue1.valueEok,
+          row.fundValues.blue1.weight,
+          diff("blue1"),
+          row.fundValues.blue1.gapQty,
+          row.fundValues.blue3.valueEok,
+          row.fundValues.blue3.weight,
+          diff("blue3"),
+          row.fundValues.blue3.gapQty,
+        ]);
+      });
+      const csv = lines.map((row) => row.map(csvEscape).join(",")).join("\n");
+      const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      const stamp = new Date().toISOString().slice(0, 10);
+      link.download = `mp_dashboard_${stamp}.csv`;
+      link.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function normalizeName(value) {
+      return (value || "").toString().trim();
+    }
+
+    function normalizePct(value) {
+      if (value === null || value === undefined || value === "") return 0;
+      const number = Number(value);
+      if (!Number.isFinite(number)) return 0;
+      return number > 1 ? number / 100 : number;
+    }
+
+    function parsePct(value) {
+      const text = (value || "").toString().trim().replace("%", "");
+      if (!text) return 0;
+      const number = Number(text);
+      if (!Number.isFinite(number)) return 0;
+      return number > 1 ? number / 100 : number;
+    }
+
+    function formatPctInput(value) {
+      return formatNumber(normalizePct(value) * 100, 1) + "%";
+    }
+
+    function formatPct(value) {
+      return formatNumber((value || 0) * 100, 2) + "%";
+    }
+
+    function formatNumber(value, digits) {
+      if (value === null || value === undefined || Number.isNaN(value)) return "";
+      return Number(value).toLocaleString("ko-KR", {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      });
+    }
+
+    function sum(values) {
+      return values.reduce((acc, value) => acc + (Number(value) || 0), 0);
+    }
+
+    function firstNumber(values) {
+      for (const value of values) {
+        const number = Number(value);
+        if (Number.isFinite(number) && number !== 0) return number;
+      }
+      return null;
+    }
+
+    function csvEscape(value) {
+      const text = value === null || value === undefined ? "" : String(value);
+      if (/[",\n]/.test(text)) return `"${text.replaceAll('"', '""')}"`;
+      return text;
+    }
+  </script>
+</body>
+</html>
