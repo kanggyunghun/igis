@@ -1,0 +1,20 @@
+# igis 의존 패키지
+# 설치: pip install -r requirements.txt
+
+# 데이터 수집
+FinanceDataReader>=0.9.50      # 가격/거래량/상장목록 (screener, post_ipo, whole_stock, under_20w)
+yfinance>=0.2.40               # canaria, ciss 의 글로벌 가격
+pandas-datareader>=0.10.0      # FRED 등 (canaria, ciss)
+
+# 데이터 처리
+pandas>=2.0.0
+numpy>=1.24.0
+
+# 엑셀 입출력
+openpyxl>=3.1.0                # .xlsx 읽기/쓰기 + 차트
+
+# 콘솔 출력
+tabulate>=0.9.0                # under_20w 표 출력
+
+# HTTP (FDR/FRED 요청 + under_20w 타임아웃 패치)
+requests>=2.31.0
