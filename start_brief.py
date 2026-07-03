@@ -524,7 +524,7 @@ def save_excel(df: pd.DataFrame, names: dict, mode: int) -> str:
         df_all = df_all.sort_values(by=['_o', '10일선이탈일', '10일선돌파일'],
                                     ascending=[True, False, True], na_position='last').drop(columns='_o')
 
-    out_dir = os.path.join(CURRENT_DIR, "[오전] start_brief")
+    out_dir = os.path.join(CURRENT_DIR, "outputs", "start_brief")
     os.makedirs(out_dir, exist_ok=True)
     suffix = "보고용" if mode == 1 else "실시간"
     path = os.path.join(out_dir, f"조건별_분류_{suffix}_{datetime.now():%Y%m%d_%H%M%S}.xlsx")

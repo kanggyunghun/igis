@@ -3,6 +3,12 @@
 CISS Risk Scoring - Transforms Module
 ======================================
 원본 데이터 → 15개 지표 변환 → ECDF 정규화
+
+[2026-07-03 수정]
+  - _eq3_illiquidity: 0-volume 방어(0→NaN→ffill), inf→NaN 치환,
+    rolling min_periods=15 완화 (NaN 1~2개가 20일 윈도우를 오염시키지 않도록)
+  - transform_all: dropna 직전에 inf→NaN 치환 + 꼬리 결측 제한적 ffill(limit=5)
+    → 특정 지표의 단기 NaN이 전체 날짜를 절단하는 문제 방지
 """
 
 import pandas as pd
@@ -46,6 +52,16 @@ class IndicatorTransformer:
         indicators['FI1'] = self._fi1_cds(df)
         indicators['FI2'] = self._fi2_fin_volatility(df)
         indicators['FI3'] = self._fi3_fin_relative_return(df)
+
+        # ---------------------------------------------------------------
+        # [수정] inf 방어 + 꼬리 결측 제한적 보정 (5영업일 한도)
+        #   - 어떤 지표든 연산 과정에서 생긴 inf 를 NaN 으로 치환
+        #   - 최근 5영업일 한도로만 ffill → 단기 결측은 carry,
+        #     장기 결측(시리즈 사망)은 기존처럼 dropna 에 걸려 절단됨
+        #     (그건 오히려 발견해야 할 신호이므로 의도된 동작)
+        # ---------------------------------------------------------------
+        indicators = indicators.replace([np.inf, -np.inf], np.nan)
+        indicators = indicators.ffill(limit=5)
 
         cleaned = indicators.dropna()
         if cleaned.empty:
@@ -117,12 +133,18 @@ class IndicatorTransformer:
         return df['VKOSPI_Index']
 
     def _eq3_illiquidity(self, df: pd.DataFrame) -> pd.Series:
-        """EQ3: Amihud 비유동성 (illiquidity, stress=up)"""
+        """EQ3: Amihud 비유동성 (illiquidity, stress=up)
+
+        [수정] 0-volume 방어 + inf 치환 + min_periods 완화
+        """
         returns = df['KOSPI_Index'].pct_change().abs()
-        volume = df['KOSPI_Index_VOLUME']
+        # 0-volume(비거래일/결측 대체값) 방어: 0 → NaN → ffill
+        volume = df['KOSPI_Index_VOLUME'].replace(0, np.nan).ffill()
         # Amihud = |return| / volume (scaled)
         illiq = (returns / volume) * 1e12  # 스케일 조정
-        return illiq.rolling(self.vol_window).mean()
+        illiq = illiq.replace([np.inf, -np.inf], np.nan)
+        # min_periods 완화: NaN 1~2개가 20일 윈도우를 오염시키지 않도록
+        return illiq.rolling(self.vol_window, min_periods=15).mean()
 
     # =========================================================================
     # FX Market Indicators
@@ -208,7 +230,7 @@ def compute_indicators(raw_data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFra
     원본 데이터 → 지표 변환 → ECDF 정규화
 
     Args:
-        raw_data: 원본 Bloomberg 데이터
+        raw_data: 원본 데이터 (data_loader_v2 기준)
 
     Returns:
         indicators: 변환된 15개 지표 (원본 스케일)
@@ -226,7 +248,7 @@ def compute_indicators(raw_data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFra
 
 
 if __name__ == '__main__':
-    from data_loader import load_raw_data
+    from data_loader_v2 import load_raw_data
 
     daily, weekly = load_raw_data()
     indicators, ecdf_indicators = compute_indicators(weekly)

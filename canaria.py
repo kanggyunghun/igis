@@ -1116,7 +1116,7 @@ class RiskScoringModel:
 if __name__ == "__main__":
     today_str = datetime.now().strftime("%Y-%m-%d")
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    out_dir = os.path.join(base_dir, "canaria", today_str)
+    out_dir = os.path.join(base_dir, "outputs", "canaria", today_str)
     os.makedirs(out_dir, exist_ok=True)
 
     model = RiskScoringModel()                 # 환경변수 FRED_API_KEY 필요
