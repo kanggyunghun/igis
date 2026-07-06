@@ -101,6 +101,37 @@ _OPT_NAME = re.compile(r"(\d{4})-(\d{2})\s*(콜|풋)\s*(\d+(?:\.\d+)?)")
 _STOCKFUT_NAME = re.compile(r"^(.*?)\s+F\s+\d{6}")
 
 
+_OVS_OPT_CODE = re.compile(r"^[A-Z][A-Z0-9 ]*?[FGHJKMNQUVXZ]\d(C|P)\d+(?:\.\d+)?$")
+_OVS_OPT_NAME = re.compile(r"^(.*?)\s+(C|P)(\d+(?:\.\d+)?)\s*$", re.I)
+
+
+def is_overseas_option(code, name):
+    """해외 파생 중 옵션 판별. 종목코드가 (루트월물)(C|P)(행사가) 패턴이면 옵션.
+
+    예) 'CLQ6C90' → 옵션(콜, 90) / 'CLQ6' → 선물.
+    """
+    if _OVS_OPT_CODE.match(clean_text(code).upper()):
+        return True
+    # 코드가 비어있을 때 종목명 보조 판정 ('Crude Oil C90.0')
+    return bool(_OVS_OPT_NAME.match(clean_text(name)))
+
+
+def parse_overseas_option(code, name):
+    """해외옵션 종목명/코드에서 (기초자산, 'C'/'P', 행사가) 추출.
+
+    'Crude Oil C90.0' → ('Crude Oil', 'C', 90.0). 실패 시 (name, None, None).
+    """
+    m = _OVS_OPT_NAME.match(clean_text(name))
+    if m:
+        under, cp, strike = m.group(1).strip(), m.group(2).upper(), float(m.group(3))
+        return under, cp, strike
+    # 코드에서 CP만이라도
+    cm = re.search(r"(C|P)(\d+(?:\.\d+)?)$", clean_text(code).upper())
+    if cm:
+        return clean_text(name), cm.group(1), float(cm.group(2))
+    return clean_text(name), None, None
+
+
 def parse_stock_future_underlying(name):
     """개별주식선물 종목명에서 기초자산명 추출.
 
@@ -126,7 +157,7 @@ def _cell(ws, r, key):
     return ws.cell(r, COL[key]).value
 
 
-def read_sheet1(ws):
+def read_sheet1(ws, cash_etf_codes=None):
     """통합 단일시트를 자산군별로 분류해 읽는다. 소계/총계/빈 행은 제외.
 
     - 순종목비(%NAV[당일]) 를 비중으로 직접 사용 (역산 불필요).
@@ -135,8 +166,10 @@ def read_sheet1(ws):
     - 취득원가 = 전일평가액 - 전일평가손익 (두 값 모두 '전일' 컬럼이라 날짜 정합).
     - 수익률 = (당일평가액 - 취득원가) / 취득원가.  (전일손익을 당일평가액에서 빼던 버그 수정)
     """
+    cash_etf_codes = cash_etf_codes or {}
     cats = {c: [] for c in CATEGORIES}
     unclassified = []
+    reclassified_cash = []   # 초단기채권 ETF → 현금 재분류 로그
     for r in range(2, ws.max_row + 1):
         kind = clean_text(_cell(ws, r, "kind"))
         group = clean_text(_cell(ws, r, "group"))
@@ -144,6 +177,15 @@ def read_sheet1(ws):
         if not name or kind in SUBTOTAL_KINDS or group in SUBTOTAL_KINDS or group == "총계":
             continue
         cat, known = classify_row(group, kind)
+        # 해외 파생: 종류에 선물/옵션 구분이 없어 종목코드로 옵션 여부 판별
+        _code_raw = clean_text(_cell(ws, r, "code"))
+        if cat == "overseasFutures" and is_overseas_option(_code_raw, name):
+            cat = "options"
+        # 초단기채권 ETF 는 주식으로 분류돼도 현금성으로 재분류
+        code_norm = clean_text(_cell(ws, r, "code")).upper().lstrip("A")
+        if cat in ("domesticStock", "overseasStock") and code_norm in cash_etf_codes:
+            reclassified_cash.append({"row": r, "code": code_norm, "name": name})
+            cat, known = "cashOther", True
         if not known:
             unclassified.append({"row": r, "group": group, "kind": kind, "name": name})
         is_deriv = cat in DERIV_CATS
@@ -177,8 +219,12 @@ def read_sheet1(ws):
                 return_pct = (value - cost) / cost * 100.0  # 당일평가액 기준 수익률
 
         opt_expiry, opt_cp, opt_strike = (None, None, None)
+        opt_under = None
         if cat == "options":
-            opt_expiry, opt_cp, opt_strike = parse_option_name(name)
+            if kind.endswith("옵션"):          # 국내 주가지수옵션: '2026-07 콜1500 ff'
+                opt_expiry, opt_cp, opt_strike = parse_option_name(name)
+            else:                                # 해외옵션: 'Crude Oil C90.0'
+                opt_under, opt_cp, opt_strike = parse_overseas_option(_code_raw, name)
         fut_under = parse_stock_future_underlying(name) if kind == "개별주식선물" else None
 
         cats[cat].append({
@@ -207,10 +253,12 @@ def read_sheet1(ws):
             "optExpiry": opt_expiry,
             "optCP": opt_cp,
             "optStrike": opt_strike,
+            "optUnder": opt_under,
             "futUnder": fut_under,
+            "isCashEtf": (cat == "cashOther" and clean_text(_cell(ws, r, "code")).upper().lstrip("A") in cash_etf_codes),
             "sourceRow": r,
         })
-    return cats, unclassified
+    return cats, unclassified, reclassified_cash
 
 
 def derive_nav(cats):
@@ -245,6 +293,50 @@ def read_total_row(ws):
                 "sourceRow": r,
             }
     return None
+
+
+def load_cash_etf_codes(base_dir):
+    """같은 경로의 cash_etf.xlsx > 'cash' 시트에서 초단기채권 ETF 코드를 읽는다.
+
+    시트 구조: code / name / class. class 가 '초단기채권'인 종목코드를
+    현금 처리 대상으로 반환한다 (코드 6자리, 대문자 정규화).
+    파일이 없거나 시트가 없으면 빈 집합을 반환하고 경고만 출력한다.
+    """
+    path = base_dir / "cash_etf.xlsx"
+    if not path.exists():
+        print("[안내] cash_etf.xlsx 없음 — 초단기채권 ETF 현금 재분류 생략")
+        return {}
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    except Exception as e:
+        print(f"[경고] cash_etf.xlsx 열기 실패({str(e)[:50]}) — 현금 재분류 생략")
+        return {}
+    if "cash" not in wb.sheetnames:
+        print("[경고] cash_etf.xlsx 에 'cash' 시트 없음 — 현금 재분류 생략")
+        return {}
+    ws = wb["cash"]
+    header = [clean_text(c) for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+    def col_idx(*names):
+        for i, h in enumerate(header):
+            if h.lower() in names:
+                return i
+        return None
+    ci, ni, xi = col_idx("code", "코드"), col_idx("name", "코드명"), col_idx("class", "유형분류", "유형분류(축소)")
+    if ci is None or xi is None:
+        print("[경고] cash 시트에 code/class 컬럼을 찾지 못함 — 현금 재분류 생략")
+        return {}
+    codes = {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if xi >= len(row) or ci >= len(row):
+            continue
+        cls = clean_text(row[xi])
+        if cls != "초단기채권":
+            continue
+        code = clean_text(row[ci]).upper().lstrip("A")   # 혹시 접두 A가 있으면 제거
+        if code:
+            codes[code] = clean_text(row[ni]) if ni is not None and ni < len(row) else ""
+    print(f"[안내] 초단기채권 ETF {len(codes)}종목 현금 재분류 대상 로드")
+    return codes
 
 
 def reconcile(cats, totals, tol_weight=0.005, tol_value_ratio=0.001):
@@ -313,7 +405,8 @@ def build_data(workbook_path: Path):
     wb, raw = load_safe(workbook_path)
     sheet_name = wb.sheetnames[0]  # 통합 단일시트
     ws = wb[sheet_name]
-    cats, unclassified = read_sheet1(ws)
+    cash_etf_codes = load_cash_etf_codes(workbook_path.parent)
+    cats, unclassified, reclassified_cash = read_sheet1(ws, cash_etf_codes)
     nav = derive_nav(cats)
     totals = read_total_row(ws)
     recon_issues = reconcile(cats, totals)
@@ -336,6 +429,8 @@ def build_data(workbook_path: Path):
         return abs(r["value"]) if r["value"] else (abs(r["pnl"]) if r["pnl"] else 0)
 
     def _is_deposit(r):
+        if r.get("isCashEtf"):
+            return True   # 초단기채권 ETF = 현금성
         k = r["kind"] or ""
         return ("예치금" in k or "예금" in k) and "증거금" not in k
 
@@ -351,7 +446,9 @@ def build_data(workbook_path: Path):
     # 총 평가손익 = 주식(국내+해외) + 선물(국내+해외) + 옵션.
     # 현금성(cashOther) 제외 — 외화예치금/증거금의 pnl 컬럼에는 KRW 환산액이 들어와 손익이 아니다.
     PNL_CATS = ("domesticStock", "overseasStock", "domesticFutures", "overseasFutures", "options")
+    # 손익 = 주식+선물+옵션 + (현금성 중) 초단기채권 ETF 수익. 예금/증거금은 제외.
     total_pnl = sum((r["pnl"] or 0) for c in PNL_CATS for r in cats[c])
+    total_pnl += sum((r["pnl"] or 0) for r in cats["cashOther"] if r.get("isCashEtf"))
     dir_conflicts = [{"row": r["sourceRow"], "name": r["stockName"], "sub": r["sub"], "qty": r["qty"]}
                      for c in DERIV_CATS for r in cats[c] if r.get("dirConflict")]
 
@@ -380,6 +477,7 @@ def build_data(workbook_path: Path):
         "optionsPremium": options_premium,
         "totalPnl": total_pnl,
         "unclassified": unclassified,
+        "reclassifiedCash": reclassified_cash,
         "dirConflicts": dir_conflicts,
         "domesticStock": cats["domesticStock"],
         "domesticFutures": cats["domesticFutures"],
@@ -446,6 +544,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     .topbar { max-width: 1680px; margin: 0 auto; padding: 14px 18px 12px; display: grid; gap: 10px; }
     .title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
     h1 { margin: 0; font-size: 20px; font-weight: 700; color: var(--head); }
+    .date-badge { display: inline-block; margin-left: 8px; padding: 3px 12px; font-size: 14px; font-weight: 700; color: #16324f; background: #e8f1f7; border: 1px solid #c4d8e6; border-radius: 999px; vertical-align: middle; }
     .meta { color: var(--muted); font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
     .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .main-menu { display: flex; gap: 6px; }
@@ -464,7 +563,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     button.danger { color: var(--bad); border-color: #e0aaa5; background: #fff; }
     input, select { padding: 0 9px; }
     main { max-width: 1680px; margin: 0 auto; padding: 16px 18px 28px; display: grid; gap: 14px; }
-    .summary { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 10px; }
+    .summary { display: grid; grid-template-columns: repeat(7, minmax(120px, 1fr)); gap: 10px; }
     .metric, .panel { background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); }
     .metric { padding: 11px 12px; min-height: 70px; }
     .metric .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
@@ -505,6 +604,9 @@ HTML_TEMPLATE = r"""<!doctype html>
     .name-input { min-width: 160px; font-weight: 700; }
     .badge { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; height: 22px; padding: 0 8px; border-radius: 999px; font-size: 12px; font-weight: 700; }
     .badge.b { color: var(--ok); background: var(--soft-ok); } .badge.s { color: var(--bad); background: var(--soft-bad); }
+    .opt-pill { display: inline-flex; align-items: center; gap: 3px; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700; margin: 1px 2px; white-space: nowrap; }
+    .opt-pill.up { color: var(--ok); background: var(--soft-ok); }
+    .opt-pill.down { color: var(--bad); background: var(--soft-bad); }
     tfoot td { position: sticky; bottom: 0; background: #f0f4f8; font-weight: 700; color: var(--head); border-top: 2px solid var(--head-2); }
     .delete-row { width: 30px; padding: 0; }
     .grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr); gap: 14px; }
@@ -556,7 +658,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   <header>
     <div class="topbar">
       <div class="title-row">
-        <h1>블랙ON #1 포트폴리오 대시보드</h1>
+        <h1>블랙ON #1 포트폴리오 대시보드 <span class="date-badge" id="dateBadge"></span></h1>
         <div class="meta">
           <span id="workbookMeta"></span>
           <span id="navMeta"></span>
@@ -578,6 +680,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       <div class="metric" id="mPnlBox"><div class="label">총 평가손익</div><div class="value" id="mPnl">-</div><div class="sub" id="mPnlSub"></div></div>
       <div class="metric"><div class="label">종목 수 (주식)</div><div class="value" id="mCount">-</div><div class="sub" id="mCountSub"></div></div>
       <div class="metric" id="mNetBox"><div class="label">주식 순노출</div><div class="value" id="mNet">-</div><div class="sub" id="mNetSub"></div></div>
+      <div class="metric"><div class="label">파생 노출 (NAV 대비)</div><div class="value" id="mDeriv">-</div><div class="sub" id="mDerivSub"></div></div>
       <div class="metric"><div class="label">그로스 익스포저</div><div class="value" id="mGross">-</div><div class="sub" id="mGrossSub"></div></div>
       <div class="metric"><div class="label">현금 · 증거금</div><div class="value" id="mCash">-</div><div class="sub" id="mCashSub"></div></div>
     </section>
@@ -627,10 +730,10 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     <section class="view view-hidden" id="viewExposure">
       <section class="panel">
-        <div class="panel-head"><span>종목별 순노출 (현물 + 개별주식선물)</span><span class="muted" id="nettingHint"></span></div>
+        <div class="panel-head"><span>기초자산별 포지션 구조 (현물 + 선물 + 옵션)</span><span class="muted" id="nettingHint"></span></div>
         <div class="table-wrap" style="max-height:calc(100vh - 220px);">
           <table>
-            <thead><tr><th>기초자산</th><th>현물</th><th>선물 순</th><th>순노출</th><th>%NAV</th><th>상태</th></tr></thead>
+            <thead><tr><th>기초자산</th><th>현물</th><th>선물 순</th><th>파생 구성</th><th>순노출</th><th>%NAV</th><th>포지션 판정</th></tr></thead>
             <tbody id="nettingBody"></tbody>
           </table>
         </div>
@@ -672,6 +775,10 @@ HTML_TEMPLATE = r"""<!doctype html>
     document.addEventListener("DOMContentLoaded", init);
 
     function init() {
+      // 기준일: 파일명 YYYYMMDD > 워크북 수정일. 배지로 강조
+      const dm = (DATA.workbook || "").match(/(20\d{2})[._-]?(\d{2})[._-]?(\d{2})/);
+      const baseDate = dm ? `${dm[1]}-${dm[2]}-${dm[3]}` : (DATA.workbookModifiedAt || "").slice(0, 10);
+      document.getElementById("dateBadge").textContent = baseDate ? `기준일 ${baseDate}` : "";
       document.getElementById("workbookMeta").textContent = `${DATA.workbook} | 생성 ${DATA.generatedAt}`;
       const fund = (DATA.domesticStock[0] || {}).fundName || "";
       const recon = DATA.reconOk ? " · 대사 ✓" : ` · ⚠ 대사 불일치 ${DATA.reconIssues.length}건`;
@@ -728,7 +835,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         group: h.group, kind: h.kind, sub: h.sub, code: h.code, stockName: h.stockName,
         qty: h.qty, qty0: h.qty, value0: h.value, valueAbs0: h.valueAbs,
         direction: h.direction, pnl0: h.pnl, weightPrev: h.weightPrev,
-        optExpiry: h.optExpiry, optCP: h.optCP, optStrike: h.optStrike,
+        optExpiry: h.optExpiry, optCP: h.optCP, optStrike: h.optStrike, optUnder: h.optUnder,
       };
     }
     function buildAssets() {
@@ -862,7 +969,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       overseasStock: [["Ticker",""],["종목명",""],["보유수량",""],["평가액",""],["비중",""],["손익","detail"],["누적수익률",""],["전일비중","detail"],["",""]],
       domesticFutures: [["종류",""],["방향",""],["종목명",""],["계약수",""],["평가액",""],["비중",""],["만기","detail"],["손익","detail"],["",""]],
       overseasFutures: [["종류",""],["방향",""],["종목명",""],["계약수",""],["평가액",""],["비중",""],["만기","detail"],["손익","detail"],["",""]],
-      options: [["방향",""],["종목명",""],["만기",""],["C/P",""],["행사가",""],["계약수",""],["프리미엄",""],["비중",""],["손익",""],["",""]],
+      options: [["방향",""],["종목명",""],["만기/기초",""],["C/P",""],["행사가",""],["계약수",""],["프리미엄",""],["비중",""],["손익",""],["",""]],
     };
 
     function renderHead() {
@@ -944,7 +1051,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       tr.dataset.group = row.kind || "";
       tr.appendChild(badgeTd(c.direction));
       tr.appendChild(cls(textTd(row.stockName), "col-name"));
-      tr.appendChild(textTd(row.optExpiry || ""));
+      tr.appendChild(textTd(row.optExpiry || row.optUnder || ""));
       tr.appendChild(textTd(row.optCP || ""));
       tr.appendChild(numTd(row.optStrike, "raw"));
       tr.appendChild(numTd(row.qty, "raw"));
@@ -1040,7 +1147,8 @@ HTML_TEMPLATE = r"""<!doctype html>
       const futNet = sum(df.map((c) => dirSign(c.direction) * c.valueAbs)) + sum(of.map((c) => dirSign(c.direction) * c.valueAbs));
       const futGross = sum(df.map((c) => c.valueAbs)) + sum(of.map((c) => c.valueAbs));
       const optPrem = sum(op.map((c) => c.valueAbs));
-      const pnl = sum(ds.map((c) => c.pnl || 0)) + sum(os.map((c) => c.pnl || 0)) + sum(df.map((c) => c.pnl || 0)) + sum(of.map((c) => c.pnl || 0)) + sum(op.map((c) => c.pnl || 0));
+      const cashEtfPnl = sum((DATA.cashOther || []).filter((r) => r.isCashEtf).map((r) => r.pnl || 0));
+      const pnl = sum(ds.map((c) => c.pnl || 0)) + sum(os.map((c) => c.pnl || 0)) + sum(df.map((c) => c.pnl || 0)) + sum(of.map((c) => c.pnl || 0)) + sum(op.map((c) => c.pnl || 0)) + cashEtfPnl;
       const cnt = TABS.reduce((a, t) => a + activeCount(t), 0);
       const nav = DATA.nav || 1;
 
@@ -1059,6 +1167,8 @@ HTML_TEMPLATE = r"""<!doctype html>
       document.getElementById("mCountSub").textContent = `국내 ${activeCount("domesticStock")} · 해외 ${activeCount("overseasStock")} (ETF 포함, 선물·옵션 제외)`;
       document.getElementById("mNet").textContent = formatPct(equityNet / nav);
       document.getElementById("mNetSub").textContent = `${formatEok(equityNet)} · 주식 ${formatPct(stockVal / nav)} + 선물순 ${formatPct(futNet / nav)}`;
+      document.getElementById("mDeriv").textContent = formatPct((futGross + optPrem) / nav);
+      document.getElementById("mDerivSub").textContent = `선물 ${formatPct(futGross / nav)} (${formatEok(futGross)}) · 옵션 ${formatPct(optPrem / nav)} (${formatEok(optPrem)})`;
       document.getElementById("mNetBox").className = "metric " + (equityNet >= 0 ? "ok" : "bad");
       document.getElementById("mGross").textContent = formatPct(gross / nav);
       document.getElementById("mGrossSub").textContent = `${formatEok(gross)}${DATA.totalsRow && DATA.totalsRow.weight ? " · 총계행 " + formatPct(DATA.totalsRow.weight) : ""}`;
@@ -1258,53 +1368,134 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     // ---- 익스포저 분해 ----
+    // ---- 기초자산별 포지션 구조 ----
+    const _OVS_ROOT = /^([A-Z][A-Z0-9 ]*?)[FGHJKMNQUVXZ]\d(?:[CP]\d+(?:\.\d+)?)?$/;
+    function ovsRoot(code) {
+      const m = _OVS_ROOT.exec((code || "").toUpperCase().trim());
+      return m ? m[1].trim() : null;
+    }
+    function cleanOvsName(name) {
+      return (name || "").replace(/\s*\(\d{6}\)\s*$/, "").replace(/\s+[CP]\d+(?:\.\d+)?\s*$/i, "").trim();
+    }
+
     function renderNetting() {
       const body = document.getElementById("nettingBody");
       body.innerHTML = "";
-      const under = {};   // 기초자산명 -> { stock, fut }
+      const nav = DATA.nav || 1;
+      // U[key] = { name, spot, futLong, futShort, optBullPrem, optBearPrem, bullLegs[], bearLegs[] }
+      const U = {};
+      const get = (key, name) => (U[key] = U[key] || { name, spot: 0, futLong: 0, futShort: 0, optBullPrem: 0, optBearPrem: 0, bull: [], bear: [] });
+
+      // 국내주식 총액 (지수파생 대비 현물)
+      const domStockTotal = sum(activeList("domesticStock").map((r) => liveStock(r).value));
+      // USD 자산 = 해외주식 + 외화예금 + 해외 위탁증거금 (해외선물 노셔널은 환노출 아님 — 증거금만 노출)
+      const usdAssets = sum(activeList("overseasStock").map((r) => liveStock(r).value))
+        + sum((DATA.cashOther || []).filter((r) => (r.kind || "").includes("외화") || ((r.kind || "").includes("증거금") && (r.group || "").includes("해외"))).map((r) => r.valueKrw || 0));
+
+      // ① 현물: 종목별 (개별주식선물 넷팅용)
       activeList("domesticStock").forEach((r) => {
         const c = liveStock(r);
-        (under[r.stockName] = under[r.stockName] || { stock: 0, fut: 0 }).stock += c.value;
+        get(r.stockName, r.stockName).spot += c.value;
       });
-      let unparsed = 0;
+
+      // ② 국내선물
       activeList("domesticFutures").forEach((r) => {
-        if ((r.kind || "") !== "개별주식선물") return;
         const c = liveFut(r);
-        const k = r.futUnder;
-        if (!k) { unparsed++; return; }
-        (under[k] = under[k] || { stock: 0, fut: 0 }).fut += dirSign(c.direction) * c.valueAbs;
+        const kind = r.kind || "";
+        let u;
+        if (kind === "개별주식선물") u = get(r.futUnder || r.stockName, r.futUnder || r.stockName);
+        else if (kind === "주가지수선물") { u = get("__K200__", "KOSPI200"); u.spot = domStockTotal; }
+        else if (kind === "코스닥150선물") { u = get("__KQ150__", "KOSDAQ150"); }
+        else if (kind === "통화선물") { u = get("__FX__", "USD/KRW (환헤지 · 외화자산 대비)"); u.spot = usdAssets; }
+        else u = get(kind, kind);
+        const fq = fmt(Math.abs(num(r.qty) || 0), "raw");
+        if (c.direction === "매도") { u.futShort += c.valueAbs; u.bear.push({ opt: false, label: `▼ 선물매도 ${fq}계약` }); }
+        else { u.futLong += c.valueAbs; u.bull.push({ opt: false, label: `▲ 선물매수 ${fq}계약` }); }
       });
-      // 선물이 걸린 기초자산만 표시 (넷팅 관점에서 의미 있는 행)
-      const rows = Object.entries(under).filter(([, v]) => v.fut !== 0)
-        .map(([name, v]) => ({ name, ...v, net: v.stock + v.fut }))
+
+      // ③ 해외선물: 코드 루트로 그룹
+      activeList("overseasFutures").forEach((r) => {
+        const c = liveFut(r);
+        const root = ovsRoot(r.code) || cleanOvsName(r.stockName);
+        const u = get("OVS:" + root, cleanOvsName(r.stockName));
+        const fq = fmt(Math.abs(num(r.qty) || 0), "raw");
+        if (c.direction === "매도") { u.futShort += c.valueAbs; u.bear.push({ opt: false, label: `▼ 선물매도 ${fq}계약` }); }
+        else { u.futLong += c.valueAbs; u.bull.push({ opt: false, label: `▲ 선물매수 ${fq}계약` }); }
+      });
+
+      // ④ 옵션: 콜매수/풋매도=상방, 풋매수/콜매도=하방
+      activeList("options").forEach((r) => {
+        const c = liveOpt(r);
+        const isDomIdx = (r.kind || "").endsWith("옵션");     // 국내 주가지수옵션
+        let u;
+        if (isDomIdx) { u = get("__K200__", "KOSPI200"); u.spot = domStockTotal; }
+        else {
+          const root = ovsRoot(r.code) || (r.optUnder || cleanOvsName(r.stockName));
+          u = get("OVS:" + root, u && u.name ? u.name : (r.optUnder || cleanOvsName(r.stockName)));
+        }
+        const buy = c.direction === "매수";
+        const cp = r.optCP || "?";
+        const qty = fmt(Math.abs(num(r.qty) || 0), "raw");
+        const strike = r.optStrike != null ? fmt(r.optStrike, "raw") : "";
+        const bullish = (cp === "C" && buy) || (cp === "P" && !buy);
+        const label = `${bullish ? "▲" : "▼"} ${cp === "C" ? "콜" : "풋"}${buy ? "매수" : "매도"} ${strike} · ${qty}계약`;
+        if (bullish) { u.optBullPrem += c.valueAbs; u.bull.push({ opt: true, label }); }
+        else { u.optBearPrem += c.valueAbs; u.bear.push({ opt: true, label }); }
+      });
+
+      // ⑤ 판정 + 렌더 (파생 레그가 있는 기초자산만)
+      const rows = Object.entries(U)
+        .filter(([, u]) => u.futLong || u.futShort || u.optBullPrem || u.optBearPrem)
+        .map(([key, u]) => {
+          const futNet = u.futLong - u.futShort;
+          const net = u.spot + futNet + (u.optBullPrem - u.optBearPrem);
+          const hasBull = u.spot > 0 || u.futLong > 0 || u.optBullPrem > 0;
+          const hasBear = u.futShort > 0 || u.optBearPrem > 0;
+          const gross = Math.abs(u.spot) + u.futLong + u.futShort + u.optBullPrem + u.optBearPrem;
+          let verdict, vCls;
+          if (hasBull && !hasBear) { verdict = "롱 베팅"; vCls = "ret-pos"; }
+          else if (hasBear && !hasBull) { verdict = "숏 베팅"; vCls = "ret-neg"; }
+          else {
+            const tilt = gross ? net / gross : 0;
+            if (Math.abs(tilt) < 0.05) { verdict = "헤지 · 중립"; vCls = "gap-zero"; }
+            else if (tilt > 0) { verdict = `헤지 · 롱 우위 (${formatPct(Math.min(1, -(-tilt)))})`; vCls = "ret-pos"; }
+            else { verdict = `헤지 · 숏 우위 (${formatPct(Math.min(1, -tilt))})`; vCls = "ret-neg"; }
+          }
+          return { key, u, futNet, net, verdict, vCls };
+        })
         .sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
-      rows.forEach((x) => {
+
+      rows.forEach(({ u, futNet, net, verdict, vCls }) => {
         const tr = document.createElement("tr");
-        tr.appendChild(cls(textTd(x.name), "col-name"));
-        tr.appendChild(numTd(x.stock, "eok"));
-        tr.appendChild(retTd(x.fut, "eok"));
-        tr.appendChild(retTd(x.net, "eok"));
-        tr.appendChild(numTd(DATA.nav ? x.net / DATA.nav : null, "pct"));
-        let status, cl;
-        if (!x.stock && x.fut > 0) { status = "선물 롱"; cl = "ret-pos"; }
-        else if (!x.stock && x.fut < 0) { status = "선물 숏"; cl = "ret-neg"; }
-        else if (x.fut < 0) { status = `헤지 ${formatPct(Math.min(1, -x.fut / x.stock))}`; cl = ""; }
-        else if (x.fut > 0) { status = "레버리지"; cl = "ret-pos"; }
-        else { status = "상쇄"; cl = "gap-zero"; }
-        tr.appendChild(cls(textTd(status), cl || "center"));
+        tr.appendChild(cls(textTd(u.name), "col-name"));
+        tr.appendChild(numTd(u.spot || null, "eok"));
+        tr.appendChild(retTd(futNet || null, "eok"));
+        const optTd = document.createElement("td");
+        optTd.style.whiteSpace = "normal"; optTd.style.maxWidth = "300px";
+        const pills = [];
+        u.bull.filter((x) => !x.opt).forEach((x) => pills.push(`<span class="opt-pill up">${x.label}</span>`));
+        u.bear.filter((x) => !x.opt).forEach((x) => pills.push(`<span class="opt-pill down">${x.label}</span>`));
+        u.bull.filter((x) => x.opt).forEach((x) => pills.push(`<span class="opt-pill up">${x.label}</span>`));
+        u.bear.filter((x) => x.opt).forEach((x) => pills.push(`<span class="opt-pill down">${x.label}</span>`));
+        optTd.innerHTML = pills.join("") || "";
+        tr.appendChild(optTd);
+        tr.appendChild(retTd(net, "eok"));
+        tr.appendChild(numTd(net / nav, "pct"));
+        const vt = textTd(verdict); vt.classList.add(vCls); vt.style.fontWeight = "700";
+        tr.appendChild(vt);
         body.appendChild(tr);
       });
       if (!rows.length) {
         const tr = document.createElement("tr");
-        const td = document.createElement("td"); td.colSpan = 6; td.textContent = "개별주식선물 없음"; td.className = "center";
+        const td = document.createElement("td"); td.colSpan = 7; td.className = "center"; td.textContent = "파생 포지션 없음";
         tr.appendChild(td); body.appendChild(tr);
       }
       document.getElementById("nettingHint").textContent =
-        `${rows.length}개 기초자산` + (unparsed ? ` · ⚠ 기초자산 파싱실패 ${unparsed}건 (제외됨)` : "");
+        `${rows.length}개 기초자산 · ▲ 오르면 이익 (현물·선물매수·콜매수·풋매도) / ▼ 내리면 이익 (선물매도·풋매수·콜매도)`;
     }
 
+    // ---- 손익: 누적수익률 상/하위 Top 10 ----
     function renderPnl() {
-      // 주식(국내+해외)만, 누적수익률 기준 정렬
       const rows = activeList("domesticStock").concat(activeList("overseasStock"))
         .map((r) => ({ r, c: liveStock(r) }))
         .filter((x) => x.c.returnPct != null && !Number.isNaN(x.c.returnPct));
@@ -1403,7 +1594,14 @@ HTML_TEMPLATE = r"""<!doctype html>
     function round(v, d) { if (v == null || Number.isNaN(v)) return ""; const p = Math.pow(10, d); return Math.round(v * p) / p; }
     function sum(a) { return a.reduce((s, v) => s + (Number(v) || 0), 0); }
     function sumDef(a) { const f = a.filter((v) => v != null); return f.length ? sum(f) : null; }
-    function formatEok(v) { if (v == null || Number.isNaN(v)) return "-"; return round(v / 1e8, 2).toLocaleString("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + "억"; }
+    function formatEok(v) {
+      if (v == null || Number.isNaN(v)) return "-";
+      const a = Math.abs(v);
+      if (a === 0) return "0";
+      if (a >= 1e8) return round(v / 1e8, 2).toLocaleString("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + "억";
+      if (a >= 1e4) return Math.round(v / 1e4).toLocaleString("ko-KR") + "만";
+      return Math.round(v).toLocaleString("ko-KR") + "원";
+    }
     function formatPct(v) { if (v == null || Number.isNaN(v)) return ""; return round(v * 100, 2).toFixed(2) + "%"; }
     function fmt(v, type) {
       if (v == null || v === "" || Number.isNaN(v)) return "";
