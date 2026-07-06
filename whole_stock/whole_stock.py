@@ -18,6 +18,12 @@
     => 매일 돌리면 update → stack 으로 쌓이고, 다음날 또 돌리면 그 위에 또 쌓이는 구조.
        (KEEP_TRADING_DAYS 만큼만 보존 = 20일 윈도우 + 여유)
 
+등급변화(post_ipo v2 방식):
+    - 외부 전일 결과 파일 없이, 같은 누적(stack) 데이터의 '마지막에서 두 번째 날짜'를
+      비교일로 잡아 동일 스코어링을 한 번 더 수행 → 전일 등급을 구해 당일 등급과 비교.
+    - rolling 피처는 과거만 참조하므로 date <= 비교일 로 자르면 그 시점 값이 그대로 재현됨.
+    - 같으면 '유지', 다르면 'B → A' 형식. 누적이 이틀치 미만이거나 신규 편입 종목은 공란.
+
 실행:
     py -3.12 whole_stock.py                # 직전 거래일 자동 스탬프
     py -3.12 whole_stock.py 2026-06-23     # 날짜 수동 지정(선택)
@@ -818,6 +824,40 @@ def latest_scoring_frame(df: pd.DataFrame) -> pd.DataFrame:
     return latest.sort_values("total_score", ascending=False, na_position="last")
 
 
+# =============================================================================
+# 등급변화 (post_ipo v2 방식 — 같은 누적 데이터의 두 시점을 각각 스코어링해 비교)
+# =============================================================================
+def compute_prev_grades(history: pd.DataFrame):
+    """직전 거래일(비교일) 등급 계산.
+
+    post_ipo v2 와 동일 개념: 외부 전일 결과 파일 없이, 누적(stack) 데이터의
+    '마지막에서 두 번째 날짜'를 비교일로 잡아 동일 스코어링을 한 번 더 수행한다.
+    - rolling 피처는 과거만 참조 → date <= 비교일 로 자르면 그 시점 값이 그대로 재현됨.
+    - 스코어는 그날의 크로스섹션(전종목 상대순위)로 다시 계산되므로 전일 등급과 정합.
+    - FDR 오버레이 '이전'(엑셀 stack 기준) history 를 넣어야 함.
+
+    반환: (code→grade dict, 비교일 Timestamp). 누적이 이틀치 미만이면 (None, None).
+    """
+    dates = sorted(pd.to_datetime(history["date"]).dropna().unique())
+    if len(dates) < 2:
+        print("  누적 데이터가 이틀치 미만 → 등급변화 생략 (stack에 이틀치 이상 필요)")
+        return None, None
+    prev_date = pd.Timestamp(dates[-2])
+    prev_hist = history[pd.to_datetime(history["date"]) <= prev_date]
+    prev_scored = latest_scoring_frame(prev_hist)
+    print(f"  전일(비교일) 등급 계산: {prev_date:%Y-%m-%d} 기준 {prev_scored['code'].nunique():,}종목")
+    return prev_scored.set_index("code")["grade"].to_dict(), prev_date
+
+
+def _grade_change_label(cur, prev) -> str:
+    """등급변화 라벨: 동일 '유지', 변경 'B → A', 비교 불가(신규/결측) 공란."""
+    cur = "" if (cur is None or (isinstance(cur, float) and np.isnan(cur))) else str(cur)
+    prev = "" if (prev is None or (isinstance(prev, float) and np.isnan(prev))) else str(prev)
+    if cur in ("", "nan", "None") or prev in ("", "nan", "None"):
+        return ""
+    return "유지" if cur == prev else f"{prev} → {cur}"
+
+
 def _format_table_sheet(ws, freeze_row: int = 2) -> None:
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
@@ -866,8 +906,9 @@ def _create_report_sheet(writer, final, scored, price_ref_date, supply_ref_date)
     border = Border(left=Side(style="thin", color="BFBFBF"), right=Side(style="thin", color="BFBFBF"),
                     top=Side(style="thin", color="BFBFBF"), bottom=Side(style="thin", color="BFBFBF"))
 
-    for col, width in {1: 2, 2: 6, 3: 14, 4: 18, 5: 11, 6: 9, 7: 10, 8: 10, 9: 12, 10: 11,
-                       11: 12, 12: 12, 13: 3, 14: 18, 15: 10, 16: 10}.items():
+    # Top 테이블 12개 열(B~M) + 우측 차트 영역(O~P)
+    for col, width in {1: 2, 2: 6, 3: 12, 4: 18, 5: 8, 6: 7, 7: 12, 8: 11, 9: 8, 10: 8,
+                       11: 10, 12: 11, 13: 12, 14: 3, 15: 18, 16: 10}.items():
         ws.column_dimensions[get_column_letter(col)].width = width
     for r, h in {1: 6, 2: 42, 3: 23, 4: 8, 5: 8, 6: 28, 7: 22, 8: 10, 9: 8}.items():
         ws.row_dimensions[r].height = h
@@ -878,9 +919,9 @@ def _create_report_sheet(writer, final, scored, price_ref_date, supply_ref_date)
             for cell in row:
                 cell.fill = fill(fc); cell.font = fo; cell.alignment = al; cell.border = border
 
-    ws.merge_cells("B2:L2"); style_range("B2:L2", color_navy, font(True, color_white, 18))
+    ws.merge_cells("B2:M2"); style_range("B2:M2", color_navy, font(True, color_white, 18))
     ws["B2"] = "전종목 수급 스코어링 보고서"
-    ws.merge_cells("B3:L3"); style_range("B3:L3", color_blue, font(False, color_white, 10))
+    ws.merge_cells("B3:M3"); style_range("B3:M3", color_blue, font(False, color_white, 10))
     ws["B3"] = (f"가격/거래량 기준일: {price_ref_date}  |  수급 기준일: {supply_ref_date}  |  "
                 f"분석 대상: {len(final):,}개 종목  |  가격/수급/거래대금: "
                 f"{PRICE_WEIGHT:.0%}/{SUPPLY_WEIGHT:.0%}/{VALUE_WEIGHT:.0%}")
@@ -907,11 +948,14 @@ def _create_report_sheet(writer, final, scored, price_ref_date, supply_ref_date)
         ws.cell(row=6, column=col).value = label
         ws.cell(row=7, column=col).value = value
 
-    ws.merge_cells("B10:L10"); style_range("B10:L10", color_blue, font(True, color_white, 11), left_center)
+    ws.merge_cells("B10:M10"); style_range("B10:M10", color_blue, font(True, color_white, 11), left_center)
     ws["B10"] = "[Top] 추천종목  (종합스코어 65점 이상)"
     ws["B10"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
 
-    headers = ["순위", "코드", "종목명", "종합", "등급", "가격", "수급", "거래대금", "1주수익률", "1개월수익률", "기관/외인"]
+    # 열순서: 등급 왼쪽(순위/코드/종목명/종합)은 유지, 등급부터
+    # 등급 → 등급변화 → 기관/외인 → 가격 → 수급 → 거래대금 → 1주수익률 → 1개월수익률
+    headers = ["순위", "코드", "종목명", "종합", "등급", "등급변화", "기관/외인",
+               "가격", "수급", "거래대금", "1주수익률", "1개월수익률"]
     for offset, header in enumerate(headers, start=2):
         cell = ws.cell(row=11, column=offset)
         cell.value = header; cell.font = font(True, color_white, 9); cell.fill = fill(color_navy)
@@ -923,18 +967,28 @@ def _create_report_sheet(writer, final, scored, price_ref_date, supply_ref_date)
         er = 11 + idx
         row_fill = fill(color_white if idx % 2 else color_gray)
         data = [idx, row.get("코드", ""), row.get("종목명", ""), row.get("종합스코어", ""),
-                row.get("등급", ""), row.get("가격스코어", ""), row.get("수급스코어", ""),
-                row.get("거래대금스코어", ""), row.get("1주수익률(%)", ""), row.get("1개월수익률(%)", ""),
-                "동시순매수" if bool(row.get("기관외인동시순매수", False)) else ""]
+                row.get("등급", ""), row.get("등급변화", ""),
+                "동시순매수" if bool(row.get("기관외인동시순매수", False)) else "",
+                row.get("가격스코어", ""), row.get("수급스코어", ""), row.get("거래대금스코어", ""),
+                row.get("1주수익률(%)", ""), row.get("1개월수익률(%)", "")]
         for offset, value in enumerate(data, start=2):
             cell = ws.cell(row=er, column=offset)
             cell.value = value; cell.font = font(False, "000000", 9); cell.fill = row_fill
             cell.alignment = center; cell.border = border
-        gc = ws.cell(row=er, column=6)
+        gc = ws.cell(row=er, column=6)  # '등급' 열 (B=2 기준 5번째 → F열)
         grade = str(row.get("등급", "-"))
         gc.fill = fill(grade_colors.get(grade, "BFBFBF")); gc.font = font(True, color_white, 9)
+        # 등급변화 강조: 상향(→ 이후가 더 좋은 등급) 녹색 / 하향 적색
+        change = str(row.get("등급변화", "") or "")
+        if "→" in change:
+            order = {"F": 0, "D": 1, "C": 2, "B": 3, "A": 4}
+            parts = [p.strip() for p in change.split("→")]
+            if len(parts) == 2 and parts[0] in order and parts[1] in order:
+                cc = ws.cell(row=er, column=7)  # '등급변화' 열 (G열)
+                up = order[parts[1]] > order[parts[0]]
+                cc.font = font(True, color_green if up else color_red, 9)
 
-    chart_row, cl, cv = 10, 14, 15
+    chart_row, cl, cv = 10, 15, 16
     ws.cell(row=chart_row, column=cl).value = "구분"
     ws.cell(row=chart_row, column=cv).value = "종목수"
     for idx, (label, value) in enumerate([("강세 (A+B)", grade_counts["A"] + grade_counts["B"]),
@@ -955,14 +1009,15 @@ def _create_report_sheet(writer, final, scored, price_ref_date, supply_ref_date)
         pt = DataPoint(idx=idx); pt.graphicalProperties.solidFill = color; pie.series[0].dPt.append(pt)
     pie.dataLabels = DataLabelList(); pie.dataLabels.showPercent = True; pie.dataLabels.showCatName = True
     pie.width, pie.height = 12, 9
-    ws.add_chart(pie, "N15")
+    ws.add_chart(pie, "O15")
 
 
 def save_outputs(scored, history, sheet, supply_ref_date):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output = OUTPUT_DIR / f"전종목_수급_스코어링_{datetime.now().strftime('%Y%m%d')}.xlsx"
     output_cols = [
-        "date", "code", "name", "is_etf", "total_score", "grade", "price_score", "supply_score", "value_score",
+        "date", "code", "name", "is_etf", "total_score", "grade", "grade_change",
+        "price_score", "supply_score", "value_score",
         "price_data_date", "price_data_source", "today_price_applied",
         "close", "ret_1d", "ret_5d", "ret_20d", "risk_adj_mom", "vol_20d", "trend_align_score",
         "ma5", "ma10", "ma20", "above_ma10", "ma5_above_ma10",
@@ -977,7 +1032,7 @@ def save_outputs(scored, history, sheet, supply_ref_date):
             scored[col] = pd.NA
     rename = {
         "date": "기준일", "code": "코드", "name": "종목명", "is_etf": "구분",
-        "total_score": "종합스코어", "grade": "등급",
+        "total_score": "종합스코어", "grade": "등급", "grade_change": "등급변화",
         "price_score": "가격스코어", "supply_score": "수급스코어", "value_score": "거래대금스코어",
         "price_data_date": "가격/거래량기준일", "price_data_source": "가격데이터소스", "today_price_applied": "당일가격반영",
         "close": "종가", "ret_1d": "당일수익률(%)", "ret_5d": "1주수익률(%)", "ret_20d": "1개월수익률(%)",
@@ -1123,8 +1178,28 @@ def main() -> None:
     wide = long_to_wide(merged_long)
     history = add_time_series_features(wide)
     supply_ref_date = history["date"].max()
+
+    # 전일(비교일) 등급 — FDR 오버레이 '전' 엑셀 누적 기준으로 계산 (post_ipo v2 방식)
+    print("\n[4-b] 전일 등급 계산 (등급변화용)")
+    prev_grades, prev_grade_date = compute_prev_grades(history)
+
     history = apply_fdr_price_overlay(history)
     scored = latest_scoring_frame(history)
+
+    # 등급변화 부여: 동일 '유지', 변경 'B → A', 신규/비교불가 공란
+    if prev_grades:
+        prev_series = scored["code"].map(prev_grades)
+        scored["prev_grade"] = prev_series
+        scored["grade_change"] = [
+            _grade_change_label(c, p) for c, p in zip(scored["grade"], prev_series)
+        ]
+        n_changed = int((scored["grade_change"].str.contains("→", na=False)).sum())
+        n_kept = int((scored["grade_change"] == "유지").sum())
+        print(f"  등급변화: 유지 {n_kept:,}종목 / 변경 {n_changed:,}종목 "
+              f"(비교일 {prev_grade_date:%Y-%m-%d})")
+    else:
+        scored["prev_grade"] = ""
+        scored["grade_change"] = ""
 
     # ETF 판별 (스코어링은 전체 한 풀에서 그대로, 식별용 '구분' 컬럼만 부여)
     etf_flags = classify_etf(scored["code"], scored["name"])
@@ -1135,7 +1210,8 @@ def main() -> None:
     output = save_outputs(scored, history, "stack", supply_ref_date)
 
     print("\n[TOP 20]")
-    cols = ["date", "code", "name", "total_score", "grade", "price_score", "supply_score", "value_score"]
+    cols = ["date", "code", "name", "total_score", "grade", "grade_change",
+            "price_score", "supply_score", "value_score"]
     print(scored[cols].head(20).to_string(index=False))
     print(f"\n저장 완료: {output}")
     print(f"백업 파일 : {STACK_FILE}")
