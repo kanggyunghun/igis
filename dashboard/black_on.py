@@ -258,7 +258,43 @@ def read_sheet1(ws, cash_etf_codes=None):
             "isCashEtf": (cat == "cashOther" and clean_text(_cell(ws, r, "code")).upper().lstrip("A") in cash_etf_codes),
             "sourceRow": r,
         })
+    _merge_duplicate_positions(cats)
     return cats, unclassified, reclassified_cash
+
+
+def _merge_duplicate_positions(cats):
+    """백오피스가 같은 종목을 여러 행(전일보유분/당일증감분)으로 내보내는 경우 병합.
+
+    병합 키: (종목코드 또는 종목명) + 방향(파생). 수량·평가액·손익·비중을 합산해
+    최종 포지션 한 행으로 만든다. 방향이 다른 파생(매수/매도 병존)은 별도 유지.
+    """
+    for cat, recs in cats.items():
+        merged = {}
+        order = []
+        for rec in recs:
+            key = (rec.get("code") or rec.get("stockName"), rec.get("direction") or "")
+            if key not in merged:
+                merged[key] = rec
+                rec["mergedRows"] = 1
+                order.append(key)
+                continue
+            m = merged[key]
+            m["mergedRows"] += 1
+            for f in ("qty", "value", "prevValue", "pnl", "weight", "weightPrev"):
+                a, b = m.get(f), rec.get(f)
+                if a is None and b is None:
+                    continue
+                m[f] = (a or 0) + (b or 0)
+            m["valueAbs"] = abs(m["value"]) if m.get("value") is not None else None
+            # 수익률 재계산 (주식류): 취득원가 = Σ전일평가액 − Σ전일손익
+            if cat in ("domesticStock", "overseasStock"):
+                pv, pnl, v = m.get("prevValue"), m.get("pnl"), m.get("value")
+                m["returnPct"] = None
+                if pv is not None and pnl is not None:
+                    cost = pv - pnl
+                    if cost and v is not None:
+                        m["returnPct"] = (v - cost) / cost * 100.0
+        cats[cat] = [merged[k] for k in order]
 
 
 def derive_nav(cats):
@@ -522,12 +558,13 @@ HTML_TEMPLATE = r"""<!doctype html>
   <title>블랙ON 포트폴리오 대시보드</title>
   <style>
     :root {
-      color-scheme: light;
-      --bg: #f6f7f9; --panel: #ffffff; --line: #d8dee8; --line-strong: #aab6c6;
-      --text: #1d2733; --muted: #687589; --head: #143a5a; --head-2: #1f6f8f;
-      --ok: #0f7b59; --warn: #a45b00; --bad: #b3261e;
-      --soft-ok: #e5f3ed; --soft-warn: #fff2d8; --soft-bad: #fde7e4; --edit: #fff8d7;
-      --shadow: 0 1px 2px rgba(20, 34, 52, 0.08);
+      color-scheme: dark;
+      --bg: #0a0a0a; --panel: #141414; --panel-2: #1b1b1b; --line: #2a2a2a; --line-strong: #3d3d3d;
+      --text: #e8e6e1; --muted: #8a877f; --head: #f5a623; --head-2: #ff9500;
+      --amber: #ffa028; --amber-soft: #3a2a10;
+      --ok: #26a269; --warn: #f5a623; --bad: #e5484d;
+      --soft-ok: #0f2a1f; --soft-warn: #332610; --soft-bad: #33151a; --edit: #2a2410;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
     }
     * { box-sizing: border-box; }
     body {
@@ -544,13 +581,13 @@ HTML_TEMPLATE = r"""<!doctype html>
     .topbar { max-width: 1680px; margin: 0 auto; padding: 14px 18px 12px; display: grid; gap: 10px; }
     .title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
     h1 { margin: 0; font-size: 20px; font-weight: 700; color: var(--head); }
-    .date-badge { display: inline-block; margin-left: 8px; padding: 3px 12px; font-size: 14px; font-weight: 700; color: #16324f; background: #e8f1f7; border: 1px solid #c4d8e6; border-radius: 999px; vertical-align: middle; }
+    .date-badge { display: inline-block; margin-left: 8px; padding: 3px 12px; font-size: 14px; font-weight: 700; color: #0a0a0a; background: var(--amber); border: 1px solid var(--amber); border-radius: 999px; vertical-align: middle; }
     .meta { color: var(--muted); font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
     .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .main-menu { display: flex; gap: 6px; }
-    .menu-btn { padding: 0 22px; height: 36px; font-weight: 700; font-size: 14px; border: 1px solid var(--line-strong); background: #fff; color: var(--muted); border-radius: 8px; cursor: pointer; }
-    .menu-btn:hover { color: var(--head); border-color: var(--head-2); background: #f4faff; }
-    .menu-btn.active { background: #16324f; border-color: #16324f; color: #fff; }
+    .menu-btn { padding: 0 22px; height: 36px; font-weight: 700; font-size: 14px; border: 1px solid var(--line-strong); background: var(--panel-2); color: var(--muted); border-radius: 6px; cursor: pointer; }
+    .menu-btn:hover { color: var(--amber); border-color: var(--amber); background: #1f1a10; }
+    .menu-btn.active { background: var(--amber); border-color: var(--amber); color: #0a0a0a; }
     .view.view-hidden { display: none; }
     .toolbar-divider { width: 1px; height: 22px; background: var(--line); margin: 0 2px; }
     button, select, input {
@@ -563,18 +600,20 @@ HTML_TEMPLATE = r"""<!doctype html>
     button.danger { color: var(--bad); border-color: #e0aaa5; background: #fff; }
     input, select { padding: 0 9px; }
     main { max-width: 1680px; margin: 0 auto; padding: 16px 18px 28px; display: grid; gap: 14px; }
+    .notice-bar { display: flex; align-items: center; gap: 10px; background: #1c2530; color: #fff; border: 1px solid #2c3a49; border-radius: 8px; padding: 10px 14px; font-size: 13px; line-height: 1.4; box-shadow: var(--shadow); }
+    .notice-bar b { color: #ffd45e; font-weight: 700; }
     .summary { display: grid; grid-template-columns: repeat(7, minmax(120px, 1fr)); gap: 10px; }
     .metric, .panel { background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); }
     .metric { padding: 11px 12px; min-height: 70px; }
     .metric .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-    .metric .value { font-size: 19px; font-weight: 700; color: var(--head); }
+    .metric .value { font-size: 19px; font-weight: 700; color: var(--text); }
     .metric .sub { font-size: 11px; color: var(--muted); margin-top: 2px; font-weight: 600; }
     .metric.bad .value { color: var(--bad); } .metric.ok .value { color: var(--ok); }
     .panel { overflow: hidden; }
     .panel-head {
       display: flex; justify-content: space-between; align-items: center; gap: 12px;
-      padding: 10px 12px; background: #eef3f8; border-bottom: 1px solid var(--line);
-      color: var(--head); font-weight: 700; min-height: 50px;
+      padding: 10px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line-strong);
+      color: var(--amber); font-weight: 700; min-height: 50px;
     }
     .panel-body { padding: 10px 12px; }
     .workspace { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 14px; align-items: stretch; }
@@ -582,13 +621,14 @@ HTML_TEMPLATE = r"""<!doctype html>
     .fund-tabs { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; background: #fff; }
     .fund-tab { all: unset; cursor: pointer; padding: 4px 14px; font-weight: 600; font-size: 12.5px; color: var(--muted); border-right: 1px solid var(--line); }
     .fund-tab:last-child { border-right: 0; }
-    .fund-tab:hover { background: #f4faff; color: var(--head); }
-    .fund-tab.active { background: var(--head-2); color: #fff; }
+    .fund-tab:hover { background: #1f1a10; color: var(--amber); }
+    .fund-tab.active { background: var(--amber); color: #0a0a0a; }
     .table-wrap { overflow: auto; flex: 1 1 auto; min-height: 0; background: #fff; }
     table { width: 100%; border-collapse: separate; border-spacing: 0; }
     th, td { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 8px 10px; vertical-align: middle; white-space: nowrap; }
-    th { position: sticky; top: 0; z-index: 5; background: var(--head); color: #fff; font-weight: 700; text-align: center; padding: 10px; }
-    tbody td { background: #fff; } tbody tr:nth-child(even) td { background: #fafbfd; }
+    th { position: sticky; top: 0; z-index: 5; background: #000; color: var(--amber); font-weight: 700; text-align: center; padding: 10px; border-bottom: 1px solid var(--line-strong); }
+    tbody td { background: var(--panel); } tbody tr:nth-child(even) td { background: var(--panel-2); }
+    tbody tr:hover td { background: #241f14; }
     tbody tr.hidden { display: none; }
     td.number { text-align: right; font-variant-numeric: tabular-nums; }
     td.center { text-align: center; }
@@ -598,7 +638,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     tbody tr.row-bad td.col-name { box-shadow: inset 3px 0 0 var(--bad); }
     td.col-name { max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
     .editable { width: 100%; min-width: 70px; border: 1px solid transparent; background: transparent; color: var(--text); padding: 4px 6px; border-radius: 4px; }
-    .editable:hover { background: #f1f5f9; border-color: var(--line); }
+    .editable:hover { background: var(--panel-2); border-color: var(--line); }
     .editable:focus { outline: none; background: var(--edit); border-color: #e1c96a; box-shadow: 0 0 0 2px rgba(225, 201, 106, 0.25); }
     .num-input { text-align: right; }
     .name-input { min-width: 160px; font-weight: 700; }
@@ -607,13 +647,16 @@ HTML_TEMPLATE = r"""<!doctype html>
     .opt-pill { display: inline-flex; align-items: center; gap: 3px; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700; margin: 1px 2px; white-space: nowrap; }
     .opt-pill.up { color: var(--ok); background: var(--soft-ok); }
     .opt-pill.down { color: var(--bad); background: var(--soft-bad); }
-    tfoot td { position: sticky; bottom: 0; background: #f0f4f8; font-weight: 700; color: var(--head); border-top: 2px solid var(--head-2); }
+    .opt-pill.flat { color: var(--muted); background: #eef1f5; }
+    .deriv-line { line-height: 1.9; }
+    .deriv-line + .deriv-line { margin-top: 2px; padding-top: 2px; border-top: 1px dashed var(--line); }
+    tfoot td { position: sticky; bottom: 0; background: #000; font-weight: 700; color: var(--amber); border-top: 2px solid var(--amber); }
     .delete-row { width: 30px; padding: 0; }
     .grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr); gap: 14px; }
     .chart-layout { display: grid; grid-template-columns: minmax(460px, 1.6fr) minmax(300px, max-content); gap: 18px; align-items: center; }
-    .alloc-detail { border: 1px solid var(--line); border-radius: 8px; background: #fafbfd; min-height: 120px; }
+    .alloc-detail { border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); min-height: 120px; }
     .alloc-detail-empty { padding: 18px 14px; color: var(--muted); font-size: 12.5px; text-align: center; }
-    .alloc-detail-head { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 12px; border-bottom: 1px solid var(--line); background: #eef3f8; border-radius: 8px 8px 0 0; font-weight: 700; color: var(--head); }
+    .alloc-detail-head { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 12px; border-bottom: 1px solid var(--line-strong); background: #000; border-radius: 8px 8px 0 0; font-weight: 700; color: var(--amber); }
     .alloc-detail-body { padding: 8px 12px; display: grid; gap: 5px; font-size: 12.5px; }
     .alloc-detail-row { display: flex; justify-content: space-between; gap: 10px; }
     .alloc-detail-row .k { color: var(--muted); }
@@ -621,26 +664,26 @@ HTML_TEMPLATE = r"""<!doctype html>
     .alloc-detail-list { border-top: 1px dashed var(--line); margin-top: 4px; padding-top: 6px; display: grid; gap: 4px; }
     .alloc-detail-scroll { max-height: 420px; overflow-y: auto; margin-top: 6px; border: 1px solid var(--line); border-radius: 6px; }
     .mini-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12.5px; }
-    .mini-table th { position: sticky; top: 0; background: #16324f; color: #fff; font-weight: 700; padding: 7px 10px; text-align: right; font-size: 12px; z-index: 2; }
+    .mini-table th { position: sticky; top: 0; background: #000; color: var(--amber); font-weight: 700; padding: 7px 10px; text-align: right; font-size: 12px; z-index: 2; }
     .mini-table th:first-child { text-align: left; }
-    .mini-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); background: #fff; white-space: nowrap; }
-    .mini-table tbody tr:nth-child(even) td { background: #f7f9fc; }
-    .mini-table tbody tr:hover td { background: #eef5fb; }
+    .mini-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--panel); white-space: nowrap; }
+    .mini-table tbody tr:nth-child(even) td { background: var(--panel-2); }
+    .mini-table tbody tr:hover td { background: #241f14; }
     .mini-table td.nm { font-weight: 600; max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
     .mini-table td.number { text-align: right; font-variant-numeric: tabular-nums; }
     .mini-table td.center { text-align: center; }
     .alloc-close { all: unset; cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 700; padding: 0 4px; border-radius: 4px; }
     .alloc-close:hover { color: var(--bad); background: var(--soft-bad); }
-    #allocPie path.seg { cursor: pointer; transition: opacity .12s; }
-    #allocPie path.seg:hover { opacity: .85; }
-    #allocPie path.seg.selected { stroke: #c8a24b; stroke-width: 3; }
+    #allocPie path.seg { cursor: pointer; transition: opacity .12s, filter .12s; }
+    #allocPie path.seg:hover { opacity: .9; filter: brightness(1.12); }
+    #allocPie path.seg.selected { stroke: #ffd45e; stroke-width: 3.5; filter: brightness(1.15) drop-shadow(0 0 8px rgba(255,160,40,0.6)); }
     .pie-wrap { display: grid; justify-items: center; gap: 9px; }
     .pie-label-in { font-weight: 700; }
     .pie-label-out { font-size: 16px; font-weight: 600; fill: var(--text); }
     .pie-leader { stroke: var(--line-strong); stroke-width: 1; fill: none; }
     .legend { display: grid; gap: 4px; align-content: center; }
     .legend-item { display: grid; grid-template-columns: 12px 1fr 64px 84px; align-items: center; gap: 8px; font-size: 13px; padding: 5px 8px; border-radius: 6px; }
-    .legend-item:hover { background: #f2f6fa; }
+    .legend-item:hover { background: var(--panel-2); }
     .legend-swatch { width: 12px; height: 12px; border-radius: 3px; }
     .legend-label { white-space: nowrap; font-weight: 600; }
     .legend-pct { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
@@ -669,12 +712,19 @@ HTML_TEMPLATE = r"""<!doctype html>
         <button class="menu-btn active" type="button" data-view="overview">개요</button>
         <button class="menu-btn" type="button" data-view="holdings">보유내역</button>
         <button class="menu-btn" type="button" data-view="pnl">손익</button>
-        <button class="menu-btn" type="button" data-view="exposure">익스포저</button>
+        <button class="menu-btn" type="button" data-view="exposure">선물 · 옵션 익스포저</button>
       </div>
     </div>
   </header>
 
   <main>
+    <div class="notice-bar" role="note">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="flex:0 0 auto;">
+        <path d="M12 9v4M12 17h.01" stroke="#ffd45e" stroke-width="2.2" stroke-linecap="round"/>
+        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" stroke="#ffd45e" stroke-width="2" stroke-linejoin="round"/>
+      </svg>
+      <span><b>장 마감 전</b> 대시보드를 이용하는 경우 실시간 시세를 반영하지 못해 평가액·수익률은 정확하지 않을 수 있습니다. 포지션 파악 용도로만 활용하세요.</span>
+    </div>
     <section class="summary view" id="viewSummary" aria-label="요약">
       <div class="metric"><div class="label">펀드 NAV</div><div class="value" id="mNav">-</div><div class="sub" id="mNavSub"></div></div>
       <div class="metric" id="mPnlBox"><div class="label">총 평가손익</div><div class="value" id="mPnl">-</div><div class="sub" id="mPnlSub"></div></div>
@@ -733,7 +783,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         <div class="panel-head"><span>기초자산별 포지션 구조 (현물 + 선물 + 옵션)</span><span class="muted" id="nettingHint"></span></div>
         <div class="table-wrap" style="max-height:calc(100vh - 220px);">
           <table>
-            <thead><tr><th>기초자산</th><th>현물</th><th>선물 순</th><th>파생 구성</th><th>순노출</th><th>%NAV</th><th>포지션 판정</th></tr></thead>
+            <thead><tr><th>기초자산</th><th>현물</th><th>선물 순</th><th>구성</th><th>순노출</th><th>%NAV</th><th>포지션 판정</th></tr></thead>
             <tbody id="nettingBody"></tbody>
           </table>
         </div>
@@ -762,8 +812,8 @@ HTML_TEMPLATE = r"""<!doctype html>
   <script>
     const DATA = __DATA_JSON__;
     const STORAGE_KEY = `blackon-dashboard:v2:${DATA.workbook}:${DATA.workbookModifiedAt}:${DATA.workbookSize}`;
-    const CHART_COLORS = { domestic: "#16324f", overseas: "#2f5d7c", domesticFut: "#5b7c99", overseasFut: "#8fa6b8", opt: "#c8a24b", cash: "#dde3e9" };
-    const CHART_TEXT = { domestic: "#ffffff", overseas: "#ffffff", domesticFut: "#ffffff", overseasFut: "#16324f", opt: "#3d3115", cash: "#3d4a58" };
+    const CHART_COLORS = { domestic: "#ff9500", overseas: "#c77b0f", domesticFut: "#8a5a12", overseasFut: "#5c4a2a", opt: "#e5484d", cash: "#3a3a3a" };
+    const CHART_TEXT = { domestic: "#0a0a0a", overseas: "#0a0a0a", domesticFut: "#ffffff", overseasFut: "#ffffff", opt: "#ffffff", cash: "#e8e6e1" };
     const TABS = ["domesticStock", "domesticFutures", "overseasStock", "overseasFutures", "options"];
     const TAB_LABEL = { domesticStock: "국내주식", domesticFutures: "국내선물", overseasStock: "해외주식", overseasFutures: "해외선물", options: "옵션" };
     const isFut = (t) => t === "domesticFutures" || t === "overseasFutures";
@@ -1183,13 +1233,42 @@ HTML_TEMPLATE = r"""<!doctype html>
       for (const k in attrs) e.setAttribute(k, attrs[k]);
       return e;
     }
+    const PIE_SHADE = { domestic: ["#ffb347", "#e07d00"], overseas: ["#e0900f", "#9c5f08"], domesticFut: ["#a56a16", "#6e470d"], overseasFut: ["#75603a", "#463719"], opt: ["#ff5f63", "#c1373b"], cash: ["#4a4a4a", "#2b2b2b"] };
+    function _pieDefs(keys) {
+      const ns = "http://www.w3.org/2000/svg";
+      const defs = document.createElementNS(ns, "defs");
+      // 조각별 방사형 그라디언트 (안쪽 밝게 → 바깥 어둡게)
+      keys.forEach((k) => {
+        const g = document.createElementNS(ns, "radialGradient");
+        g.setAttribute("id", "pieG_" + k);
+        g.setAttribute("cx", "50%"); g.setAttribute("cy", "50%"); g.setAttribute("r", "72%");
+        const sh = PIE_SHADE[k] || ["#888", "#555"];
+        const s1 = document.createElementNS(ns, "stop"); s1.setAttribute("offset", "35%"); s1.setAttribute("stop-color", sh[0]);
+        const s2 = document.createElementNS(ns, "stop"); s2.setAttribute("offset", "100%"); s2.setAttribute("stop-color", sh[1]);
+        g.appendChild(s1); g.appendChild(s2); defs.appendChild(g);
+      });
+      // 드롭 섀도 필터
+      const f = document.createElementNS(ns, "filter");
+      f.setAttribute("id", "pieShadow"); f.setAttribute("x", "-20%"); f.setAttribute("y", "-20%"); f.setAttribute("width", "140%"); f.setAttribute("height", "140%");
+      f.innerHTML = '<feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.55"/>';
+      defs.appendChild(f);
+      // 홀 내부 은은한 글로우
+      const hg = document.createElementNS(ns, "radialGradient");
+      hg.setAttribute("id", "pieHoleGlow"); hg.setAttribute("cx", "50%"); hg.setAttribute("cy", "42%"); hg.setAttribute("r", "60%");
+      hg.innerHTML = '<stop offset="0%" stop-color="#ffa028" stop-opacity="0.18"/><stop offset="100%" stop-color="#0a0a0a" stop-opacity="0"/>';
+      defs.appendChild(hg);
+      return defs;
+    }
     function drawPieSVG(svg, parts, total, nav) {
       svg.innerHTML = "";
       const CX = 460, CY = 380, R = 310;
+      svg.appendChild(_pieDefs(parts.map((p) => p.key)));
+      // 바닥 그림자용 원반 (입체 받침)
+      svg.appendChild(_el("circle", { cx: CX, cy: CY + 4, r: R, fill: "#000000", opacity: "0.35", filter: "url(#pieShadow)" }));
       let ang = -90;                         // 12시 방향 시작
       const outLabels = [];
       const MIN_FS = 17, MAX_FS = 26;
-      const lr = R * 0.6;
+      const lr = R * 0.72;
       // 1-pass: 각 조각의 수용 가능 글자크기 계산 → 내부 라벨 공통 크기 결정
       const metas = [];
       let a = -90;
@@ -1214,7 +1293,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         const path = sweep >= 359.99
           ? `M ${CX - R} ${CY} A ${R} ${R} 0 1 1 ${CX + R} ${CY} A ${R} ${R} 0 1 1 ${CX - R} ${CY} Z`
           : `M ${CX} ${CY} L ${x0} ${y0} A ${R} ${R} 0 ${large} 1 ${x1} ${y1} Z`;
-        const seg = _el("path", { d: path, fill: CHART_COLORS[p.key], stroke: "#ffffff", "stroke-width": 1.5, class: "seg" + (state.allocSel === p.key ? " selected" : ""), "data-key": p.key });
+        const seg = _el("path", { d: path, fill: `url(#pieG_${p.key})`, stroke: "#0a0a0a", "stroke-width": 2, class: "seg" + (state.allocSel === p.key ? " selected" : ""), "data-key": p.key });
         seg.addEventListener("click", () => { state.allocSel = (state.allocSel === p.key) ? null : p.key; renderAlloc(); });
         svg.appendChild(seg);
         const pctTxt = formatPct(p.val / nav);
@@ -1230,6 +1309,16 @@ HTML_TEMPLATE = r"""<!doctype html>
         }
         ang += sweep;
       });
+      // 중앙 도넛 홀 (입체 + 정보 표시)
+      const holeR = R * 0.42;
+      svg.appendChild(_el("circle", { cx: CX, cy: CY, r: holeR, fill: "#0a0a0a", stroke: "#2a2a2a", "stroke-width": 1.5 }));
+      svg.appendChild(_el("circle", { cx: CX, cy: CY, r: holeR, fill: "url(#pieHoleGlow)", opacity: "0.6" }));
+      const navLabel = _el("text", { x: CX, y: CY - 10, "text-anchor": "middle", "font-size": 20, "font-weight": "700", fill: "#8a877f", "pointer-events": "none" });
+      navLabel.textContent = "NAV";
+      const navVal = _el("text", { x: CX, y: CY + 22, "text-anchor": "middle", "font-size": 30, "font-weight": "800", fill: "#ffa028", "pointer-events": "none" });
+      navVal.textContent = formatEok(nav);
+      svg.appendChild(navLabel); svg.appendChild(navVal);
+
       // 리더라인 라벨: 좌/우로 나눠 세로 겹침 방지
       const sides = { left: [], right: [] };
       outLabels.forEach((o) => { (Math.cos(o.mid) >= 0 ? sides.right : sides.left).push(o); });
@@ -1374,6 +1463,18 @@ HTML_TEMPLATE = r"""<!doctype html>
       const m = _OVS_ROOT.exec((code || "").toUpperCase().trim());
       return m ? m[1].trim() : null;
     }
+    const MONTH_CODE = { F:1,G:2,H:3,J:4,K:5,M:6,N:7,Q:8,U:9,V:10,X:11,Z:12 };
+    function ovsExpiry(code) {
+      // 'CLQ6C90' / 'NQU6' → 월물문자+연도숫자에서 만기월 파생 (Q6 → 2026-08)
+      const m = /([FGHJKMNQUVXZ])(\d)(?:[CP]\d+(?:\.\d+)?)?$/.exec((code || "").toUpperCase().trim());
+      if (!m) return "";
+      const mon = MONTH_CODE[m[1]];
+      const nowY = new Date().getFullYear();
+      // 연도 한 자리: 현재 십년대 기준 근접 연도 선택
+      let y = Math.floor(nowY / 10) * 10 + Number(m[2]);
+      if (y < nowY - 2) y += 10;
+      return `${y}-${String(mon).padStart(2, "0")}`;
+    }
     function cleanOvsName(name) {
       return (name || "").replace(/\s*\(\d{6}\)\s*$/, "").replace(/\s+[CP]\d+(?:\.\d+)?\s*$/i, "").trim();
     }
@@ -1384,13 +1485,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       const nav = DATA.nav || 1;
       // U[key] = { name, spot, futLong, futShort, optBullPrem, optBearPrem, bullLegs[], bearLegs[] }
       const U = {};
-      const get = (key, name) => (U[key] = U[key] || { name, spot: 0, futLong: 0, futShort: 0, optBullPrem: 0, optBearPrem: 0, bull: [], bear: [] });
-
-      // 국내주식 총액 (지수파생 대비 현물)
-      const domStockTotal = sum(activeList("domesticStock").map((r) => liveStock(r).value));
-      // USD 자산 = 해외주식 + 외화예금 + 해외 위탁증거금 (해외선물 노셔널은 환노출 아님 — 증거금만 노출)
-      const usdAssets = sum(activeList("overseasStock").map((r) => liveStock(r).value))
-        + sum((DATA.cashOther || []).filter((r) => (r.kind || "").includes("외화") || ((r.kind || "").includes("증거금") && (r.group || "").includes("해외"))).map((r) => r.valueKrw || 0));
+      const get = (key, name) => (U[key] = U[key] || { name, spot: 0, futLong: 0, futShort: 0, optBullPrem: 0, optBearPrem: 0, futBuyQty: 0, futSellQty: 0, optLegs: {} });
 
       // ① 현물: 종목별 (개별주식선물 넷팅용)
       activeList("domesticStock").forEach((r) => {
@@ -1404,13 +1499,13 @@ HTML_TEMPLATE = r"""<!doctype html>
         const kind = r.kind || "";
         let u;
         if (kind === "개별주식선물") u = get(r.futUnder || r.stockName, r.futUnder || r.stockName);
-        else if (kind === "주가지수선물") { u = get("__K200__", "KOSPI200"); u.spot = domStockTotal; }
+        else if (kind === "주가지수선물") { u = get("__K200__", "KOSPI200"); }
         else if (kind === "코스닥150선물") { u = get("__KQ150__", "KOSDAQ150"); }
-        else if (kind === "통화선물") { u = get("__FX__", "USD/KRW (환헤지 · 외화자산 대비)"); u.spot = usdAssets; }
+        else if (kind === "통화선물") { u = get("__FX__", "USD/KRW (달러선물)"); }
         else u = get(kind, kind);
-        const fq = fmt(Math.abs(num(r.qty) || 0), "raw");
-        if (c.direction === "매도") { u.futShort += c.valueAbs; u.bear.push({ opt: false, label: `▼ 선물매도 ${fq}계약` }); }
-        else { u.futLong += c.valueAbs; u.bull.push({ opt: false, label: `▲ 선물매수 ${fq}계약` }); }
+        const fq = Math.abs(num(r.qty) || 0);
+        if (c.direction === "매도") { u.futShort += c.valueAbs; u.futSellQty += fq; }
+        else { u.futLong += c.valueAbs; u.futBuyQty += fq; }
       });
 
       // ③ 해외선물: 코드 루트로 그룹
@@ -1418,9 +1513,9 @@ HTML_TEMPLATE = r"""<!doctype html>
         const c = liveFut(r);
         const root = ovsRoot(r.code) || cleanOvsName(r.stockName);
         const u = get("OVS:" + root, cleanOvsName(r.stockName));
-        const fq = fmt(Math.abs(num(r.qty) || 0), "raw");
-        if (c.direction === "매도") { u.futShort += c.valueAbs; u.bear.push({ opt: false, label: `▼ 선물매도 ${fq}계약` }); }
-        else { u.futLong += c.valueAbs; u.bull.push({ opt: false, label: `▲ 선물매수 ${fq}계약` }); }
+        const fq = Math.abs(num(r.qty) || 0);
+        if (c.direction === "매도") { u.futShort += c.valueAbs; u.futSellQty += fq; }
+        else { u.futLong += c.valueAbs; u.futBuyQty += fq; }
       });
 
       // ④ 옵션: 콜매수/풋매도=상방, 풋매수/콜매도=하방
@@ -1428,70 +1523,228 @@ HTML_TEMPLATE = r"""<!doctype html>
         const c = liveOpt(r);
         const isDomIdx = (r.kind || "").endsWith("옵션");     // 국내 주가지수옵션
         let u;
-        if (isDomIdx) { u = get("__K200__", "KOSPI200"); u.spot = domStockTotal; }
+        if (isDomIdx) { u = get("__K200__", "KOSPI200"); }
         else {
           const root = ovsRoot(r.code) || (r.optUnder || cleanOvsName(r.stockName));
           u = get("OVS:" + root, u && u.name ? u.name : (r.optUnder || cleanOvsName(r.stockName)));
         }
         const buy = c.direction === "매수";
         const cp = r.optCP || "?";
-        const qty = fmt(Math.abs(num(r.qty) || 0), "raw");
-        const strike = r.optStrike != null ? fmt(r.optStrike, "raw") : "";
-        const bullish = (cp === "C" && buy) || (cp === "P" && !buy);
-        const label = `${bullish ? "▲" : "▼"} ${cp === "C" ? "콜" : "풋"}${buy ? "매수" : "매도"} ${strike} · ${qty}계약`;
-        if (bullish) { u.optBullPrem += c.valueAbs; u.bull.push({ opt: true, label }); }
-        else { u.optBearPrem += c.valueAbs; u.bear.push({ opt: true, label }); }
+        const strike = r.optStrike;
+        const legKey = `${cp}|${strike}`;   // 같은 CP·행사가는 매수/매도 상계
+        const leg = u.optLegs[legKey] = u.optLegs[legKey] || { cp, strike, buyQty: 0, sellQty: 0, buyPrem: 0, sellPrem: 0, expiry: "" };
+        if (!leg.expiry) leg.expiry = r.optExpiry || r.maturity || ovsExpiry(r.code);
+        const q = Math.abs(num(r.qty) || 0);
+        if (buy) { leg.buyQty += q; leg.buyPrem += c.valueAbs; }
+        else { leg.sellQty += q; leg.sellPrem += c.valueAbs; }
       });
 
-      // ⑤ 판정 + 렌더 (파생 레그가 있는 기초자산만)
-      const rows = Object.entries(U)
-        .filter(([, u]) => u.futLong || u.futShort || u.optBullPrem || u.optBearPrem)
-        .map(([key, u]) => {
-          const futNet = u.futLong - u.futShort;
-          const net = u.spot + futNet + (u.optBullPrem - u.optBearPrem);
-          const hasBull = u.spot > 0 || u.futLong > 0 || u.optBullPrem > 0;
-          const hasBear = u.futShort > 0 || u.optBearPrem > 0;
-          const gross = Math.abs(u.spot) + u.futLong + u.futShort + u.optBullPrem + u.optBearPrem;
-          let verdict, vCls;
-          if (hasBull && !hasBear) { verdict = "롱 베팅"; vCls = "ret-pos"; }
-          else if (hasBear && !hasBull) { verdict = "숏 베팅"; vCls = "ret-neg"; }
-          else {
-            const tilt = gross ? net / gross : 0;
-            if (Math.abs(tilt) < 0.05) { verdict = "헤지 · 중립"; vCls = "gap-zero"; }
-            else if (tilt > 0) { verdict = `헤지 · 롱 우위 (${formatPct(Math.min(1, -(-tilt)))})`; vCls = "ret-pos"; }
-            else { verdict = `헤지 · 숏 우위 (${formatPct(Math.min(1, -tilt))})`; vCls = "ret-neg"; }
-          }
-          return { key, u, futNet, net, verdict, vCls };
-        })
-        .sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
+      const domStockTotalV = sum(activeList("domesticStock").map((r) => liveStock(r).value));
 
-      rows.forEach(({ u, futNet, net, verdict, vCls }) => {
+      // ⑤ 섹션 분리 렌더: 선물 섹션 → 옵션 섹션
+      const sectionRow = (label) => {
         const tr = document.createElement("tr");
-        tr.appendChild(cls(textTd(u.name), "col-name"));
-        tr.appendChild(numTd(u.spot || null, "eok"));
-        tr.appendChild(retTd(futNet || null, "eok"));
-        const optTd = document.createElement("td");
-        optTd.style.whiteSpace = "normal"; optTd.style.maxWidth = "300px";
-        const pills = [];
-        u.bull.filter((x) => !x.opt).forEach((x) => pills.push(`<span class="opt-pill up">${x.label}</span>`));
-        u.bear.filter((x) => !x.opt).forEach((x) => pills.push(`<span class="opt-pill down">${x.label}</span>`));
-        u.bull.filter((x) => x.opt).forEach((x) => pills.push(`<span class="opt-pill up">${x.label}</span>`));
-        u.bear.filter((x) => x.opt).forEach((x) => pills.push(`<span class="opt-pill down">${x.label}</span>`));
-        optTd.innerHTML = pills.join("") || "";
-        tr.appendChild(optTd);
+        const td = document.createElement("td");
+        td.colSpan = 7; td.textContent = label;
+        td.style.cssText = "background:#000;color:#ffa028;font-weight:800;font-size:15px;letter-spacing:0.06em;padding:11px 14px;border-top:2px solid #ffa028;border-bottom:1px solid #3d3d3d;";
+        tr.appendChild(td); return tr;
+      };
+      const verdictOf = (spot, bullVal, bearVal) => {
+        const hasBull = spot > 0 || bullVal > 0;
+        const hasBear = bearVal > 0;
+        const net = spot + bullVal - bearVal;
+        const gross = Math.abs(spot) + bullVal + bearVal;
+        if (hasBull && !hasBear) return { v: "롱 베팅", c: "ret-pos", net };
+        if (hasBear && !hasBull) return { v: "숏 베팅", c: "ret-neg", net };
+        const tilt = gross ? net / gross : 0;
+        if (Math.abs(tilt) < 0.05) return { v: "헤지 · 중립", c: "gap-zero", net };
+        if (tilt > 0) return { v: `헤지 · 롱 우위 (${formatPct(tilt)})`, c: "ret-pos", net };
+        return { v: `헤지 · 숏 우위 (${formatPct(-tilt)})`, c: "ret-neg", net };
+      };
+      const pushRow = (name, spot, futNetVal, pillsHtml, net, verdict) => {
+        const tr = document.createElement("tr");
+        tr.appendChild(cls(textTd(name), "col-name"));
+        tr.appendChild(numTd(spot || null, "eok"));
+        tr.appendChild(retTd(futNetVal, "eok"));
+        const td = document.createElement("td");
+        td.style.whiteSpace = "normal"; td.style.maxWidth = "300px";
+        td.innerHTML = pillsHtml;
+        tr.appendChild(td);
         tr.appendChild(retTd(net, "eok"));
         tr.appendChild(numTd(net / nav, "pct"));
-        const vt = textTd(verdict); vt.classList.add(vCls); vt.style.fontWeight = "700";
+        const vt = textTd(verdict.v); vt.classList.add(verdict.c); vt.style.fontWeight = "700";
         tr.appendChild(vt);
         body.appendChild(tr);
+      };
+
+      // --- 선물 섹션 ---
+      const futRows = Object.entries(U).filter(([, u]) => u.futLong || u.futShort)
+        .map(([key, u]) => {
+          const futNet = u.futLong - u.futShort;
+          const netQ = u.futBuyQty - u.futSellQty;
+          let pill;
+          if (u.futBuyQty && u.futSellQty) {
+            const detail = `(매수 ${fmt(u.futBuyQty, "raw")} · 매도 ${fmt(u.futSellQty, "raw")})`;
+            pill = netQ > 0 ? `<span class="opt-pill up">▲ 선물 순매수 ${fmt(netQ, "raw")}계약 ${detail}</span>`
+              : netQ < 0 ? `<span class="opt-pill down">▼ 선물 순매도 ${fmt(-netQ, "raw")}계약 ${detail}</span>`
+              : `<span class="opt-pill flat">선물 상쇄 ${detail}</span>`;
+          } else if (u.futBuyQty) pill = `<span class="opt-pill up">▲ 선물매수 ${fmt(u.futBuyQty, "raw")}계약</span>`;
+          else pill = `<span class="opt-pill down">▼ 선물매도 ${fmt(u.futSellQty, "raw")}계약</span>`;
+          const verdict = verdictOf(u.spot, Math.max(futNet, 0), Math.max(-futNet, 0));
+          const domestic = !key.startsWith("OVS:");
+          return { name: u.name, domestic, spot: u.spot, futNet, pill, net: u.spot + futNet, verdict };
+        })
+        .sort((a, b) => (b.domestic - a.domestic) || (Math.abs(b.net) - Math.abs(a.net)));
+      if (futRows.length) {
+        body.appendChild(sectionRow(`선물 (${futRows.length})`));
+        const mkFutGroup = (label) => {
+          const tr = document.createElement("tr");
+          const td = document.createElement("td");
+          td.colSpan = 7;
+          td.innerHTML = `<span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#ffa028;margin-right:9px;vertical-align:middle;"></span>${label}`;
+          td.style.cssText = "background:linear-gradient(90deg,#3a2a10 0%,#1b1b1b 60%);color:#ffc46b;font-weight:800;font-size:13px;letter-spacing:0.04em;padding:9px 14px;border-left:4px solid #ffa028;border-top:1px solid #2a2a2a;text-transform:uppercase;";
+          tr.appendChild(td); return tr;
+        };
+        let prevDom = null;
+        futRows.forEach((x) => {
+          if (x.domestic !== prevDom) { body.appendChild(mkFutGroup(x.domestic ? "국내 선물" : "해외 선물")); prevDom = x.domestic; }
+          pushRow(x.name, x.spot, x.futNet, x.pill, x.net, x.verdict);
+        });
+      }
+
+      // --- 옵션 섹션: 전용 열 구성 (기초자산/종류/행사가/포지션/만기월/순노출/판정) ---
+      const optLegRows = [];
+      Object.entries(U).forEach(([key, u]) => {
+        const domestic = !key.startsWith("OVS:");
+        Object.values(u.optLegs).forEach((L) => {
+          optLegRows.push({ under: u.name, domestic, ...L, netQty: L.buyQty - L.sellQty, netPrem: L.buyPrem - L.sellPrem });
+        });
       });
-      if (!rows.length) {
+      // 국내 → 해외, 그 안에서 콜 전부 → 풋 전부 (같은 종류 안에서는 기초자산 → 행사가 순)
+      optLegRows.sort((a, b) =>
+        (b.domestic - a.domestic)
+        || (a.cp === b.cp ? 0 : (a.cp === "C" ? -1 : 1))
+        || a.under.localeCompare(b.under, "ko")
+        || ((a.strike || 0) - (b.strike || 0)));
+
+      const optVerdict = (cp, netQty) => {
+        if (netQty === 0) return "상쇄";
+        if (cp === "C") return netQty > 0 ? "상승 베팅" : "프리미엄 수취 (상승 제한)";
+        return netQty > 0 ? "하락 방어·베팅" : "프리미엄 수취 (하락 감수)";
+      };
+
+      if (optLegRows.length) {
+        body.appendChild(sectionRow(`옵션 (${optLegRows.length})`));
+        // 옵션 전용 헤더 행
+        const mkOptHead = () => {
+          const hd = document.createElement("tr");
+          ["기초자산", "종류", "행사가", "포지션 (계약)", "만기월", "순노출 (프리미엄)", "포지션 판정"].forEach((h, i) => {
+            const td = document.createElement("td");
+            td.textContent = h;
+            td.style.cssText = "background:#0f0f0f;font-weight:700;color:#8a877f;font-size:12px;"
+              + (i >= 2 && i <= 5 ? "text-align:right;" : "");
+            if (i === 1) td.style.textAlign = "center";
+            hd.appendChild(td);
+          });
+          return hd;
+        };
+        const mkGroupRow = (label) => {
+          const tr = document.createElement("tr");
+          const td = document.createElement("td");
+          td.colSpan = 7; td.textContent = label;
+          td.style.cssText = "background:#1b1b1b;color:#e8e6e1;font-weight:700;font-size:12.5px;padding:5px 12px;border-left:3px solid #ffa028;";
+          tr.appendChild(td); return tr;
+        };
+        body.appendChild(mkOptHead());
+        // 국내 옵션 종합 전략 판정
+        const domLegs = optLegRows.filter((L) => L.domestic && L.netQty !== 0);
+        const callBuy = domLegs.filter((L) => L.cp === "C" && L.netQty > 0);
+        const callSell = domLegs.filter((L) => L.cp === "C" && L.netQty < 0);
+        const putBuy = domLegs.filter((L) => L.cp === "P" && L.netQty > 0);
+        const putSell = domLegs.filter((L) => L.cp === "P" && L.netQty < 0);
+        const cB = callBuy.length > 0, cS = callSell.length > 0, pB = putBuy.length > 0, pS = putSell.length > 0;
+        const strikesEq = (as, bs) => as.length === 1 && bs.length === 1 && as[0].strike === bs[0].strike;
+        const domPrem = sum(domLegs.map((L) => L.netPrem));   // 순프리미엄(음수=수취 우위)
+        function classifyDomOptions() {
+          if (!domLegs.length) return null;
+          // 보유 주식 롱 + 풋 순매수 → 포트폴리오 보험
+          if (pB && !cB && !cS && !pS && domStockTotalV > 0)
+            return { label: "포트폴리오 보험 (Protective Put)", desc: "주식 롱 보유분의 하락 방어" };
+          // 콜매수 + 풋매수 → 스트래들/스트랭글 (변동성 롱)
+          if (cB && pB && !cS && !pS) {
+            const eq = strikesEq(callBuy, putBuy);
+            return { label: eq ? "롱 스트래들" : "롱 스트랭글", desc: "양방향 변동성 확대 베팅" };
+          }
+          // 콜매도 + 풋매도 → 숏 스트래들/스트랭글 (변동성 숏)
+          if (cS && pS && !cB && !pB)
+            return { label: strikesEq(callSell, putSell) ? "숏 스트래들" : "숏 스트랭글", desc: "변동성 축소·프리미엄 수취" };
+          // 콜만
+          if ((cB || cS) && !pB && !pS)
+            return cB && !cS ? { label: "콜 방향성 (상승 베팅)", desc: "" }
+              : cS && !cB ? { label: "콜 매도 (상승 제한·프리미엄)", desc: "" }
+              : { label: "콜 스프레드", desc: "제한적 상승 베팅" };
+          // 풋만
+          if ((pB || pS) && !cB && !cS)
+            return pB && !pS ? { label: "풋 방향성 (하락 베팅/방어)", desc: "" }
+              : pS && !pB ? { label: "풋 매도 (하락 감수·프리미엄)", desc: "" }
+              : { label: "풋 스프레드", desc: "제한적 하락 베팅" };
+          // 콜·풋 혼합 (매수/매도 섞임) → 순프리미엄 부호로 방향 힌트
+          return { label: "복합 옵션 전략", desc: domPrem >= 0 ? "프리미엄 지불형" : "프리미엄 수취형" };
+        }
+        const domVerdict = classifyDomOptions();
+
+        let prevDom = null;
+        optLegRows.forEach((L) => {
+          if (L.domestic !== prevDom) {
+            body.appendChild(mkGroupRow(L.domestic ? "국내 옵션" : "해외 옵션"));
+            prevDom = L.domestic;
+          }
+          const tr = document.createElement("tr");
+          tr.appendChild(cls(textTd(L.under), "col-name"));
+          const cpTd = textTd(L.cp); cpTd.className = "center"; cpTd.style.fontWeight = "700";
+          tr.appendChild(cpTd);
+          tr.appendChild(numTd(L.strike, "raw"));
+          // 포지션: 매수 + / 매도 − 부호, 양방향이면 내역 병기
+          const posTd = document.createElement("td"); posTd.className = "number";
+          const both = L.buyQty && L.sellQty;
+          const netS = L.netQty > 0 ? `+${fmt(L.netQty, "raw")}` : fmt(L.netQty, "raw");
+          posTd.textContent = both ? `${netS} (+${fmt(L.buyQty, "raw")} / -${fmt(L.sellQty, "raw")})` : netS;
+          tr.appendChild(posTd);
+          tr.appendChild(cls(textTd(L.expiry || ""), "number"));
+          tr.appendChild(numTd(L.netPrem, "eok"));
+          const vt = textTd(optVerdict(L.cp, L.netQty)); vt.style.fontWeight = "600";
+          tr.appendChild(vt);
+          body.appendChild(tr);
+          // 국내 옵션의 마지막 레그 직후 종합판정 행 삽입
+          const isLastDom = L.domestic && domVerdict &&
+            (optLegRows.indexOf(L) === optLegRows.map((x) => x.domestic).lastIndexOf(true));
+          if (isLastDom) {
+            const sr = document.createElement("tr");
+            const c1 = document.createElement("td");
+            c1.colSpan = 6;
+            c1.style.cssText = "text-align:right;font-weight:700;color:#ffa028;background:#0f0f0f;padding:7px 12px;";
+            c1.textContent = "국내 옵션 종합 판정 →";
+            sr.appendChild(c1);
+            const c2 = document.createElement("td");
+            c2.style.cssText = "background:#0f0f0f;font-weight:700;color:#e8e6e1;";
+            c2.innerHTML = domVerdict.desc
+              ? `${domVerdict.label} <span style="font-weight:500;color:var(--muted);font-size:11px;">· ${domVerdict.desc}</span>`
+              : domVerdict.label;
+            sr.appendChild(c2);
+            body.appendChild(sr);
+          }
+        });
+      }
+      const optRows = optLegRows;   // hint 용
+
+      const totalRows = futRows.length + optRows.length;
+      if (!totalRows) {
         const tr = document.createElement("tr");
         const td = document.createElement("td"); td.colSpan = 7; td.className = "center"; td.textContent = "파생 포지션 없음";
         tr.appendChild(td); body.appendChild(tr);
       }
       document.getElementById("nettingHint").textContent =
-        `${rows.length}개 기초자산 · ▲ 오르면 이익 (현물·선물매수·콜매수·풋매도) / ▼ 내리면 이익 (선물매도·풋매수·콜매도)`;
+        `선물 ${futRows.length} · 옵션 ${optRows.length} 기초자산 · ▲ 오르면 이익 / ▼ 내리면 이익`;
     }
 
     // ---- 손익: 누적수익률 상/하위 Top 10 ----
@@ -1646,13 +1899,14 @@ def main():
             workbook_path = base_dir / workbook_path
     else:
         candidates = sorted(
-            list(base_dir.glob("black_on_*.xlsx")) + list(base_dir.glob("블랙ON_*.xlsx")),
+            list(base_dir.glob("black_on_*.xlsx")) + list(base_dir.glob("블랙ON_*.xlsx"))
+            + list(base_dir.glob("체결화면*.xlsx")),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
         candidates = [p for p in candidates if not p.name.startswith("~$")]
         if not candidates:
-            print("black_on_*.xlsx / 블랙ON_*.xlsx 파일을 찾을 수 없습니다. (dashboard 폴더에 워크북을 두거나 파일명을 인자로 주세요)")
+            print("black_on_*.xlsx / 블랙ON_*.xlsx / 체결화면*.xlsx 파일을 찾을 수 없습니다. (dashboard 폴더에 워크북을 두거나 파일명을 인자로 주세요)")
             sys.exit(1)
         workbook_path = candidates[0]
         print(f"[자동 선택] {workbook_path.name}")
