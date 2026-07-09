@@ -259,7 +259,24 @@ def read_sheet1(ws, cash_etf_codes=None):
             "sourceRow": r,
         })
     _merge_duplicate_positions(cats)
+    _drop_closed_positions(cats)
     return cats, unclassified, reclassified_cash
+
+
+def _drop_closed_positions(cats):
+    """계약수(보유수량)가 0인 포지션 = 청산분이므로 제거.
+
+    현금성(cashOther)은 수량이 0이라도 예금·증거금 잔고가 있으므로 제외 대상이 아니다.
+    주식/선물/옵션에서만 qty≈0 인 행을 걸러낸다.
+    """
+    for cat in ("domesticStock", "overseasStock", "domesticFutures", "overseasFutures", "options"):
+        kept = []
+        for r in cats[cat]:
+            q = r.get("qty")
+            if q is None or abs(q) < 1e-9:
+                continue   # 청산 포지션 제외
+            kept.append(r)
+        cats[cat] = kept
 
 
 def _merge_duplicate_positions(cats):
@@ -473,8 +490,13 @@ def build_data(workbook_path: Path):
     for r in cats["cashOther"]:
         r["valueKrw"] = _cash_krw(r)
         r["isDeposit"] = _is_deposit(r)
-    cash_deposit_value = sum(r["valueKrw"] for r in cats["cashOther"] if r["isDeposit"])
-    margin_value = sum(r["valueKrw"] for r in cats["cashOther"] if "증거금" in (r["kind"] or ""))
+    _is_margin = lambda r: "증거금" in (r["kind"] or "")
+    # 3분할: 순현금(예금·예치금, ETF·증거금 제외) / 현금성 자산(초단기채권 ETF) / 증거금
+    pure_cash_value = sum(r["valueKrw"] for r in cats["cashOther"]
+                          if r["isDeposit"] and not r.get("isCashEtf") and not _is_margin(r))
+    cash_equiv_value = sum(abs(r["value"] or 0) for r in cats["cashOther"] if r.get("isCashEtf"))
+    margin_value = sum(r["valueKrw"] for r in cats["cashOther"] if _is_margin(r))
+    cash_deposit_value = pure_cash_value + cash_equiv_value   # 하위호환(기존 참조 유지)
 
     futures_net = _signed_exposure(cats["domesticFutures"]) + _signed_exposure(cats["overseasFutures"])
     futures_gross = absum("domesticFutures") + absum("overseasFutures")
@@ -507,6 +529,8 @@ def build_data(workbook_path: Path):
         "cashOtherWeight": (1.0 - stock_value / nav) if nav else None,
         "cashDepositValue": cash_deposit_value,
         "cashDepositWeight": (cash_deposit_value / nav) if nav else None,
+        "pureCashValue": pure_cash_value,
+        "cashEquivValue": cash_equiv_value,
         "marginValue": margin_value,
         "futuresNet": futures_net,
         "futuresGross": futures_gross,
@@ -732,7 +756,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       <div class="metric" id="mNetBox"><div class="label">주식 순노출</div><div class="value" id="mNet">-</div><div class="sub" id="mNetSub"></div></div>
       <div class="metric"><div class="label">파생 노출 (NAV 대비)</div><div class="value" id="mDeriv">-</div><div class="sub" id="mDerivSub"></div></div>
       <div class="metric"><div class="label">그로스 익스포저</div><div class="value" id="mGross">-</div><div class="sub" id="mGrossSub"></div></div>
-      <div class="metric"><div class="label">현금 · 증거금</div><div class="value" id="mCash">-</div><div class="sub" id="mCashSub"></div></div>
+      <div class="metric"><div class="label">현금 · 현금성 · 증거금</div><div class="value" id="mCash">-</div><div class="sub" id="mCashSub"></div></div>
     </section>
 
     <section class="grid-2 view" id="viewOverview">
@@ -1222,8 +1246,8 @@ HTML_TEMPLATE = r"""<!doctype html>
       document.getElementById("mNetBox").className = "metric " + (equityNet >= 0 ? "ok" : "bad");
       document.getElementById("mGross").textContent = formatPct(gross / nav);
       document.getElementById("mGrossSub").textContent = `${formatEok(gross)}${DATA.totalsRow && DATA.totalsRow.weight ? " · 총계행 " + formatPct(DATA.totalsRow.weight) : ""}`;
-      document.getElementById("mCash").textContent = DATA.cashDepositValue == null ? "-" : formatEok(DATA.cashDepositValue);
-      document.getElementById("mCashSub").textContent = `현금 ${formatPct(DATA.cashDepositWeight)} · 증거금 ${formatEok(DATA.marginValue || 0)}`;
+      document.getElementById("mCash").textContent = formatEok((DATA.pureCashValue || 0) + (DATA.cashEquivValue || 0) + (DATA.marginValue || 0));
+      document.getElementById("mCashSub").textContent = `현금 ${formatEok(DATA.pureCashValue)} · 현금성 ${formatEok(DATA.cashEquivValue)} · 증거금 ${formatEok(DATA.marginValue)}`;
     }
 
     // ---- SVG 파이 (가득 찬 원 + 내부 라벨, 좁은 조각은 리더라인) ----
@@ -1356,7 +1380,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         { key: "domesticFut", label: "국내선물 (노셔널)", val: domFutVal },
         { key: "overseasFut", label: "해외선물 (노셔널)", val: ovsFutVal },
         { key: "opt", label: "옵션 (프리미엄)", val: optVal },
-        { key: "cash", label: "현금·기타", val: cashVal },
+        { key: "cash", label: "현금·현금성·증거금", val: cashVal },
       ];
       const total = sum(parts.map((p) => p.val)) || 1;   // 파이 비율 분모 = 그로스+현금
       drawPieSVG(document.getElementById("allocPie"), parts.filter((p) => p.val > 0), total, nav);
@@ -1382,7 +1406,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       domesticFut: { tab: "domesticFutures", label: "국내선물" },
       overseasFut: { tab: "overseasFutures", label: "해외선물" },
       opt: { tab: "options", label: "옵션" },
-      cash: { tab: null, label: "현금·기타" },
+      cash: { tab: null, label: "현금·현금성·증거금" },
     };
     function renderAllocDetail(nav) {
       const box = document.getElementById("allocDetail");
@@ -1396,18 +1420,38 @@ HTML_TEMPLATE = r"""<!doctype html>
       const kv = (k, v) => { const d = document.createElement("div"); d.className = "alloc-detail-row"; d.innerHTML = `<span class="k">${k}</span><span class="v">${v}</span>`; body.appendChild(d); };
 
       if (key === "cash") {
-        const dep = DATA.cashOther.filter((r) => r.isDeposit);
-        const mgn = DATA.cashOther.filter((r) => (r.kind || "").includes("증거금"));
-        head.innerHTML = `<span>현금·기타</span><span style="display:inline-flex;align-items:center;gap:8px;">${formatEok((DATA.cashDepositValue || 0) + (DATA.marginValue || 0))}${closeBtn}</span>`;
-        kv("현금 (예치금+예금)", `${formatEok(DATA.cashDepositValue)} · ${formatPct(DATA.cashDepositWeight)}`);
-        kv("위탁증거금", formatEok(DATA.marginValue));
-        const list = document.createElement("div"); list.className = "alloc-detail-list";
-        dep.concat(mgn).forEach((r) => {
-          const d = document.createElement("div"); d.className = "alloc-detail-row";
-          d.innerHTML = `<span class="k">${r.stockName} <span style="color:var(--muted);font-size:11px;">${r.kind}</span></span><span class="v">${formatEok(r.valueKrw)}</span>`;
-          list.appendChild(d);
-        });
-        body.appendChild(list);
+        // 3그룹: 현금(예금·예치금) / 현금성 자산(초단기채권 ETF) / 증거금(파생 담보)
+        const isMargin = (r) => (r.kind || "").includes("증거금");
+        const cashRows = DATA.cashOther.filter((r) => r.isDeposit && !r.isCashEtf && !isMargin(r));
+        const cashEtfRows = DATA.cashOther.filter((r) => r.isCashEtf);
+        const marginRows = DATA.cashOther.filter((r) => isMargin(r));
+        const sumV = (arr, f) => arr.reduce((s, r) => s + (f(r) || 0), 0);
+        const cashSum = sumV(cashRows, (r) => r.valueKrw);
+        const etfSum = sumV(cashEtfRows, (r) => Math.abs(r.value || 0));
+        const mgnSum = sumV(marginRows, (r) => r.valueKrw);
+        const grand = cashSum + etfSum + mgnSum;
+        head.innerHTML = `<span>현금·현금성·증거금</span><span style="display:inline-flex;align-items:center;gap:8px;">${formatEok(grand)}${closeBtn}</span>`;
+        kv("현금 (예금·예치금)", `${formatEok(cashSum)} · ${formatPct(cashSum / nav)}`);
+        kv("현금성 자산 (초단기채권 ETF)", `${formatEok(etfSum)} · ${formatPct(etfSum / nav)}`);
+        kv("증거금 (파생 담보)", `${formatEok(mgnSum)} · ${formatPct(mgnSum / nav)}`);
+
+        const groupBlock = (title, rows, valFn, note) => {
+          if (!rows.length) return;
+          const h = document.createElement("div");
+          h.style.cssText = "margin-top:8px;padding:5px 8px;background:#0f0f0f;border-left:3px solid #ffa028;font-weight:700;color:#ffc46b;font-size:12px;border-radius:4px;display:flex;justify-content:space-between;";
+          h.innerHTML = `<span>${title}</span><span style="color:#ffc46b;font-weight:700;">${note || ""}</span>`;
+          body.appendChild(h);
+          const list = document.createElement("div"); list.className = "alloc-detail-list";
+          rows.slice().sort((a, b) => (valFn(b) || 0) - (valFn(a) || 0)).forEach((r) => {
+            const d = document.createElement("div"); d.className = "alloc-detail-row";
+            d.innerHTML = `<span class="k">${r.stockName} <span style="color:var(--muted);font-size:11px;">${r.kind}</span></span><span class="v">${formatEok(valFn(r))}</span>`;
+            list.appendChild(d);
+          });
+          body.appendChild(list);
+        };
+        groupBlock("현금", cashRows, (r) => r.valueKrw, `자유 인출 · ${formatEok(cashSum)}`);
+        groupBlock("현금성 자산", cashEtfRows, (r) => Math.abs(r.value || 0), `초단기채권 ETF · ${formatEok(etfSum)}`);
+        groupBlock("증거금", marginRows, (r) => r.valueKrw, `파생 포지션 담보 · ${formatEok(mgnSum)}`);
       } else {
         const tab = cfg.tab;
         const rows = activeList(tab);
