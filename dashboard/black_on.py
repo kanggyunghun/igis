@@ -21,7 +21,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
+
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 from pathlib import Path
 
 import openpyxl
@@ -157,7 +161,7 @@ def _cell(ws, r, key):
     return ws.cell(r, COL[key]).value
 
 
-def read_sheet1(ws, cash_etf_codes=None):
+def read_sheet1(ws, cash_etf_codes=None, etf_univ=None, sector_map=None):
     """통합 단일시트를 자산군별로 분류해 읽는다. 소계/총계/빈 행은 제외.
 
     - 순종목비(%NAV[당일]) 를 비중으로 직접 사용 (역산 불필요).
@@ -167,6 +171,8 @@ def read_sheet1(ws, cash_etf_codes=None):
     - 수익률 = (당일평가액 - 취득원가) / 취득원가.  (전일손익을 당일평가액에서 빼던 버그 수정)
     """
     cash_etf_codes = cash_etf_codes or {}
+    etf_univ = etf_univ or {}
+    sector_map = sector_map or {}
     cats = {c: [] for c in CATEGORIES}
     unclassified = []
     reclassified_cash = []   # 초단기채권 ETF → 현금 재분류 로그
@@ -182,10 +188,17 @@ def read_sheet1(ws, cash_etf_codes=None):
         if cat == "overseasFutures" and is_overseas_option(_code_raw, name):
             cat = "options"
         # 초단기채권 ETF 는 주식으로 분류돼도 현금성으로 재분류
-        code_norm = clean_text(_cell(ws, r, "code")).upper().lstrip("A")
+        code_norm = norm_code(_code_raw)
         if cat in ("domesticStock", "overseasStock") and code_norm in cash_etf_codes:
             reclassified_cash.append({"row": r, "code": code_norm, "name": name})
             cat, known = "cashOther", True
+        _ticker = clean_text(_cell(ws, r, "ticker"))
+        _is_etf, _etf_cls = detect_etf(_code_raw, _ticker, name, cat, etf_univ)
+        # 섹터: ETF 는 업종명이 비어 있으므로 'ETF' 로 통일, 매핑 없으면 '미분류'
+        if cat in ("domesticStock", "overseasStock"):
+            _sector = "ETF" if _is_etf else (sector_map.get(norm_name(name)) or "미분류")
+        else:
+            _sector = ""
         if not known:
             unclassified.append({"row": r, "group": group, "kind": kind, "name": name})
         is_deriv = cat in DERIV_CATS
@@ -255,7 +268,12 @@ def read_sheet1(ws, cash_etf_codes=None):
             "optStrike": opt_strike,
             "optUnder": opt_under,
             "futUnder": fut_under,
-            "isCashEtf": (cat == "cashOther" and clean_text(_cell(ws, r, "code")).upper().lstrip("A") in cash_etf_codes),
+            "isCashEtf": (cat == "cashOther" and norm_code(_code_raw) in cash_etf_codes),
+            "isEtf": _is_etf,
+            "sector": _sector,
+            "etfL1": (_etf_cls or {}).get("l1", ""),
+            "etfL2": (_etf_cls or {}).get("l2", ""),
+            "etfL3": (_etf_cls or {}).get("l3", ""),
             "sourceRow": r,
         })
     _merge_duplicate_positions(cats)
@@ -348,48 +366,673 @@ def read_total_row(ws):
     return None
 
 
-def load_cash_etf_codes(base_dir):
-    """같은 경로의 cash_etf.xlsx > 'cash' 시트에서 초단기채권 ETF 코드를 읽는다.
+def norm_code(c):
+    """종목코드 정규화. 국내코드의 접두 'A'만 제거 (미국 티커 AAPL 등은 보존).
 
-    시트 구조: code / name / class. class 가 '초단기채권'인 종목코드를
-    현금 처리 대상으로 반환한다 (코드 6자리, 대문자 정규화).
-    파일이 없거나 시트가 없으면 빈 집합을 반환하고 경고만 출력한다.
+    'A488770' -> '488770', 'A0043Y0' -> '0043Y0', 'AAPL' -> 'AAPL'
     """
-    path = base_dir / "cash_etf.xlsx"
-    if not path.exists():
-        print("[안내] cash_etf.xlsx 없음 — 초단기채권 ETF 현금 재분류 생략")
+    s = clean_text(c).upper()
+    if len(s) == 7 and s[0] == "A" and s[1:].isalnum() and any(ch.isdigit() for ch in s[1:]):
+        return s[1:]
+    return s
+
+
+def norm_name(s):
+    """종목명 매칭용 정규화: 공백 제거 + 대문자화 (엑셀 표기 흔들림 흡수)."""
+    return re.sub(r"\s+", "", clean_text(s)).upper()
+
+
+def find_data_file(workbook_path, filename):
+    """보조 데이터 파일 탐색: 워크북 폴더 > 워크북의 data/ > 상위 data/ > 스크립트 data/ 순."""
+    wp = Path(workbook_path).resolve().parent
+    cands = [wp / filename, wp / "data" / filename, wp.parent / "data" / filename, wp.parent / filename]
+    try:
+        sd = Path(__file__).resolve().parent
+        cands += [sd / "data" / filename, sd / filename]
+    except NameError:
+        pass
+    for c in cands:
+        if c.exists():
+            return c
+    return None
+
+
+# ---- ETF 판별 (etf_univ.xlsx 없을 때의 폴백 휴리스틱) ----
+_KR_ETF_BRANDS = (
+    "KODEX", "TIGER", "RISE", "KBSTAR", "ACE", "KINDEX", "SOL", "HANARO", "PLUS",
+    "ARIRANG", "KOSEF", "1Q", "KIWOOM", "HK", "WON", "TIMEFOLIO", "TIME", "BNK",
+    "VITA", "FOCUS", "히어로즈", "마이티", "마이다스", "파워", "에셋플러스",
+)
+_OVS_ETF_RE = re.compile(r"\b(ETF|ETN|Shares|Fund|Trust)\b", re.I)
+_OVS_ETF_ISSUERS = (
+    "ishares", "direxion", "spdr", "invesco", "vanguard", "proshares", "global x",
+    "vaneck", "wisdomtree", "tema", "procure", "t-rex", "bitwise", "state street",
+    "first trust", "ark ", "xtrackers", "amundi", "schwab",
+)
+
+
+def load_etf_universe(workbook_path):
+    """data/etf_univ.xlsx > 'etf' 시트에서 ETF 유니버스를 읽는다.
+
+    컬럼(위치 기준): A=코드, B=코드명, C=유형분류(대), D=유형분류(중), E=유형분류(소)
+    반환: {정규화코드: {"name":.., "l1":대, "l2":중, "l3":소}}
+    파일이 없으면 빈 dict (이 경우 종목명 휴리스틱으로 폴백).
+    """
+    path = find_data_file_glob(workbook_path, "etf_univ")
+    if path is None:
+        print("[안내] etf_univ.xlsx 없음 — 종목명 기반 휴리스틱으로 ETF 판별")
         return {}
     try:
         wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     except Exception as e:
-        print(f"[경고] cash_etf.xlsx 열기 실패({str(e)[:50]}) — 현금 재분류 생략")
+        print(f"[경고] etf_univ.xlsx 열기 실패({str(e)[:50]}) — 휴리스틱 사용")
         return {}
-    if "cash" not in wb.sheetnames:
-        print("[경고] cash_etf.xlsx 에 'cash' 시트 없음 — 현금 재분류 생략")
+    if "etf" not in wb.sheetnames:
+        print(f"[경고] etf_univ.xlsx 에 'etf' 시트 없음 (시트: {wb.sheetnames}) — 휴리스틱 사용")
         return {}
-    ws = wb["cash"]
-    header = [clean_text(c) for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-    def col_idx(*names):
+    ws = wb["etf"]
+    univ = {}
+    for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        if not row:
+            continue
+        raw = clean_text(row[0] if len(row) > 0 else "")
+        if not raw:
+            continue
+        if i == 1 and (("코드" in raw) or raw.lower() in ("code", "ticker", "종목코드")):
+            continue                                    # 헤더 행
+        g = lambda j: clean_text(row[j]) if len(row) > j else ""
+        univ[norm_code(raw)] = {"name": g(1), "l1": g(2), "l2": g(3), "l3": g(4)}
+    print(f"[안내] ETF 유니버스 {len(univ)}종목 로드 ({path.name})")
+    return univ
+
+
+def detect_etf(code, ticker, name, cat, univ):
+    """(is_etf, 분류dict|None). etf_univ 매칭 우선, 실패 시 종목명 휴리스틱."""
+    nc = norm_code(code)
+    if nc and nc in univ:
+        return True, univ[nc]
+    tk = clean_text(ticker).split(" ")[0].upper() if ticker else ""   # 'BITQ US' -> 'BITQ'
+    if tk and tk in univ:
+        return True, univ[tk]
+    nm = clean_text(name)
+    if cat == "overseasStock":
+        low = nm.lower()
+        if _OVS_ETF_RE.search(nm) or any(low.startswith(x) for x in _OVS_ETF_ISSUERS):
+            return True, None
+    elif cat == "domesticStock":
+        up = nm.upper()
+        if any(up.startswith(b + " ") for b in _KR_ETF_BRANDS):
+            return True, None
+    return False, None
+
+
+_TABLE_EXTS = (".xlsx", ".xlsm", ".xls", ".csv", "")
+
+
+def find_data_file_glob(workbook_path, stem):
+    """stem 으로 파일 탐색 (확장자·대소문자 무관, 확장자 없어도 허용).
+
+    못 찾으면 어디를 뒤졌고 그 폴더에 뭐가 있는지 출력해 원인을 바로 알 수 있게 한다.
+    """
+    wp = Path(workbook_path).resolve().parent
+    dirs, seen = [], set()
+    cands = [wp, wp / "data", wp.parent / "data", wp.parent]
+    try:
+        sd = Path(__file__).resolve().parent
+        cands += [sd / "data", sd]
+    except NameError:
+        pass
+    for d in cands:
+        rd = d.resolve() if d.exists() else d
+        if rd in seen:
+            continue
+        seen.add(rd)
+        dirs.append(rd)
+
+    other_ext = []
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for p in sorted(d.iterdir()):
+            if not p.is_file() or p.name.startswith("~$"):
+                continue
+            if p.stem.lower() != stem.lower():
+                continue
+            if p.suffix.lower() in _TABLE_EXTS:
+                return p
+            other_ext.append(p)
+
+    print(f"[진단] '{stem}' 파일을 찾지 못했습니다. 탐색한 폴더:")
+    for d in dirs:
+        if not d.is_dir():
+            print(f"    - {d}  (폴더 없음)")
+            continue
+        files = [p.name for p in sorted(d.iterdir())
+                 if p.is_file() and p.suffix.lower() in (".xlsx", ".xlsm", ".xls", ".csv")]
+        print(f"    - {d}  → {files if files else '(엑셀/CSV 없음)'}")
+    if other_ext:
+        print(f"    ※ 이름은 맞지만 확장자를 지원하지 않음: {[p.name for p in other_ext]}")
+    return None
+
+
+class _HTMLTableParser(HTMLParser):
+    """백오피스가 .xls 확장자로 내려주는 HTML <table> 을 행 리스트로 파싱."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows, self._row, self._cell = [], None, None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "tr":
+            self._row = []
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell = []
+
+    def handle_endtag(self, tag):
+        if tag == "tr":
+            if self._row:
+                self.rows.append(self._row)
+            self._row = None
+        elif tag in ("td", "th") and self._cell is not None:
+            self._row.append("".join(self._cell).strip().replace("\xa0", " "))
+            self._cell = None
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+def _sniff_format(path):
+    """파일 시그니처로 실제 형식 판별 (확장자를 믿지 않는다)."""
+    with open(path, "rb") as f:
+        head = f.read(4096)
+    if head[:4] == b"PK\x03\x04":
+        return "xlsx"                       # xlsx = zip 컨테이너
+    if head[:4] == b"\xd0\xcf\x11\xe0":
+        return "xls"                        # legacy xls = OLE2 복합문서
+    low = head.lower()
+    if b"<table" in low or b"<html" in low or b"<!doctype html" in low:
+        return "html"                       # 백오피스가 .xls 로 내려주는 HTML 표
+    if b"urn:schemas-microsoft-com:office:spreadsheet" in low:
+        return "xmlss"                      # Excel 2003 XML (SpreadsheetML)
+    return "csv"
+
+
+def _read_table(path):
+    """엑셀/CSV를 행 리스트로 읽는다. 확장자가 없거나 미상이면 파일 시그니처로 판별."""
+    ext = path.suffix.lower()
+    kind = {".xlsx": "xlsx", ".xlsm": "xlsx", ".xls": "xls", ".csv": "csv"}.get(ext)
+    sniff = _sniff_format(path)
+    if kind is None:
+        kind = sniff
+        print(f"[안내] {path.name}: 확장자 없음/미상 → 내용으로 {kind} 형식 판별")
+    elif kind != sniff:
+        # 백오피스가 .XLS 로 내려주지만 실제론 HTML/텍스트인 경우가 흔함
+        print(f"[안내] {path.name}: 확장자는 {ext} 이지만 실제 내용은 {sniff} → {sniff} 로 읽습니다")
+        kind = sniff
+
+    if kind == "xlsx":
+        # openpyxl 은 '경로'를 받으면 확장자를 검증해 거부한다(.xlsx/.xlsm 만 허용).
+        # 확장자가 없거나 다른 경우 파일을 메모리로 읽어 넘기면 검증을 우회할 수 있다.
+        if ext in (".xlsx", ".xlsm"):
+            wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        else:
+            import io
+            with open(path, "rb") as f:
+                wb = openpyxl.load_workbook(io.BytesIO(f.read()), data_only=True, read_only=True)
+        ws = wb[wb.sheetnames[0]]
+        return [list(r) for r in ws.iter_rows(values_only=True)]
+
+    if kind == "xls":
+        try:
+            import xlrd                                   # legacy .xls 전용 (선택 의존성)
+        except ImportError:
+            # py 런처와 pip 이 서로 다른 파이썬을 가리켜 '설치했는데도 안 되는' 경우가 흔하다.
+            # → 지금 실행 중인 인터프리터 경로를 그대로 찍어 정확한 설치 명령을 안내한다.
+            exe = sys.executable or "python"
+            print(f"[경고] {path.name} 은 legacy .xls(OLE2 바이너리) 형식이라 xlrd 가 필요합니다.")
+            print(f"       현재 실행 중인 파이썬: {exe}")
+            print( "       ↓ 이 파이썬에 정확히 설치하세요 (py/pip 불일치 방지)")
+            print(f'         "{exe}" -m pip install xlrd')
+            print( "       또는 엑셀에서 '다른 이름으로 저장 → .xlsx' 로 저장해도 됩니다.")
+            return []
+        try:
+            with open(path, "rb") as f:
+                bk = xlrd.open_workbook(file_contents=f.read())
+        except Exception as ex:
+            print(f"[경고] {path.name} xlrd 읽기 실패: {type(ex).__name__}: {str(ex)[:110]}")
+            print(f"       xlrd {getattr(xlrd, '__version__', '?')} / 파이썬 {sys.version.split()[0]}")
+            print("       → 엑셀에서 '다른 이름으로 저장 → .xlsx' 로 바꾸면 xlrd 없이 읽힙니다.")
+            return []
+        sh = bk.sheet_by_index(0)
+        out = []
+        for i in range(sh.nrows):
+            row = []
+            for j in range(sh.ncols):
+                c = sh.cell(i, j)
+                row.append(datetime(*xlrd.xldate_as_tuple(c.value, bk.datemode)) if c.ctype == 3 else c.value)
+            out.append(row)
+        return out
+
+    if kind in ("html", "xmlss", "csv"):
+        text = None
+        for enc in ("utf-8-sig", "cp949", "utf-16", "euc-kr"):
+            try:
+                with open(path, encoding=enc) as f:
+                    text = f.read()
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            print(f"[경고] {path.name} 인코딩 판별 실패 (utf-8/cp949/utf-16 모두 아님)")
+            return []
+
+        if kind == "html":
+            p = _HTMLTableParser()
+            p.feed(text)
+            if not p.rows:
+                print(f"[경고] {path.name}: HTML 이지만 <table> 행을 찾지 못했습니다.")
+                return []
+            print(f"[안내] {path.name}: HTML 표에서 {len(p.rows)}행 추출")
+            return p.rows
+
+        if kind == "xmlss":
+            import xml.etree.ElementTree as ET
+            NS = "{urn:schemas-microsoft-com:office:spreadsheet}"
+            try:
+                root = ET.fromstring(text)
+            except ET.ParseError as ex:
+                print(f"[경고] {path.name}: XML 파싱 실패 ({str(ex)[:60]})")
+                return []
+            out = []
+            for row in root.iter(NS + "Row"):
+                cells = []
+                for cell in row.findall(NS + "Cell"):
+                    dnode = cell.find(NS + "Data")
+                    cells.append(dnode.text if dnode is not None else "")
+                if cells:
+                    out.append(cells)
+            print(f"[안내] {path.name}: Excel 2003 XML 에서 {len(out)}행 추출")
+            return out
+
+        import csv as _csv, io as _io
+        try:
+            dialect = _csv.Sniffer().sniff(text[:4096], delimiters=",\t;|")
+        except Exception:
+            dialect = _csv.excel
+        return [r for r in _csv.reader(_io.StringIO(text), dialect)]
+
+    with open(path, "rb") as f:
+        head = f.read(24)
+    print(f"[경고] {path.name}: 형식을 알 수 없습니다. 파일 앞부분 = {head!r}")
+    return []
+
+
+# 기준가 이력에서 찾을 컬럼 키워드 그룹 (헤더 행 탐색·컬럼 매칭 공용)
+_NAV_COL_GROUPS = {
+    "date": ("처리일자", "일자", "날짜", "기준일"),
+    "adj": ("수정기준가",),
+    "raw": ("기준가격", "기준가"),
+    "aum": ("순자산",),
+    "name": ("펀드명",),
+    "code": ("펀드코드",),
+    "annual": ("연환산",),          # 연환산수익률 (원천 제공)
+    "w1": ("1주",),                 # 1주실현수익률 (원천 제공)
+    "m1": ("1개월",),               # 1개월실현수익률 (원천 제공, '12개월'과 안 겹침)
+    "total": ("총수익률",),
+}
+
+
+def _find_header_row(table, max_scan=30):
+    """헤더 행 위치를 자동 탐색.
+
+    백오피스 출력은 1행이 제목/조회조건이고 실제 헤더가 아래에 있는 경우가 흔하다.
+    각 행에서 알려진 컬럼 키워드가 몇 개 그룹이나 잡히는지 세어 가장 높은 행을 헤더로 본다.
+    (날짜 + 기준가 두 축이 모두 잡혀야 유효)
+    """
+    best_i, best_score = 0, 0
+    for i, row in enumerate(table[:max_scan]):
+        if not row:
+            continue
+        cells = [clean_text(c).replace(" ", "") for c in row if c is not None]
+        if not cells:
+            continue
+        hit_date = any(any(k in c for k in _NAV_COL_GROUPS["date"]) for c in cells)
+        hit_price = any(any(k in c for k in _NAV_COL_GROUPS["adj"] + _NAV_COL_GROUPS["raw"]) for c in cells)
+        if not (hit_date and hit_price):
+            continue
+        score = sum(
+            1 for kws in _NAV_COL_GROUPS.values()
+            if any(any(k in c for k in kws) for c in cells)
+        )
+        if score > best_score:
+            best_i, best_score = i, score
+    return best_i if best_score >= 2 else 0
+
+
+def _parse_date(v):
+    """다양한 날짜 표기를 date 로 변환. '20260715' / '2026-07-15' / datetime / 엑셀serial."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if hasattr(v, "year") and hasattr(v, "month"):        # date
+        return v
+    s = str(v).strip()
+    if isinstance(v, (int, float)) and 20000 < float(v) < 60000:   # 엑셀 serial
+        return (datetime(1899, 12, 30) + timedelta(days=int(v))).date()
+    digits = re.sub(r"[^0-9]", "", s)
+    if len(digits) == 8:
+        try:
+            return datetime.strptime(digits, "%Y%m%d").date()
+        except ValueError:
+            return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+        try:
+            return datetime.strptime(s[:10], fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _sma(vals, n):
+    """단순이동평균. 앞쪽 n-1개는 None."""
+    out, acc = [], 0.0
+    for i, v in enumerate(vals):
+        acc += v
+        if i >= n:
+            acc -= vals[i - n]
+        out.append(round(acc / n, 4) if i >= n - 1 else None)
+    return out
+
+
+SETTLE_THRESHOLD = 0.30        # 기준가 vs 수정기준가 변동률 괴리(%p) — 이 이상이면 결산일
+
+
+def _pick_fund(funds, target_code, target_name):
+    """여러 펀드가 섞인 기준가 파일에서 대상 펀드 키를 고른다. (코드 > 이름 > '블랙ON' > 첫 번째)"""
+    nrm = lambda s: re.sub(r"\s+", "", s or "")
+    if target_code and target_code in funds:
+        return target_code
+    if target_name:
+        for k, n in funds.items():
+            if nrm(n) == nrm(target_name):
+                return k
+    for k, n in funds.items():
+        if "블랙ON" in nrm(n).upper():
+            return k
+    return next(iter(funds))
+
+
+def load_nav_history(workbook_path, target_code=None, target_name=None, include_weekends=False):
+    """data/black_chart.* 에서 기준가 이력을 읽어 캔들·MA 데이터를 만든다.
+
+    [설계 — fund_nav_chart.py 와 동일 전제]
+    1) 기준가는 하루 1개 값이라 OHLC가 없다 → 시가 = 전일 종가, 종가 = 당일 기준가.
+       일봉은 꼬리 없는 몸통만 생긴다(데이터의 한계이지 버그가 아님).
+    2) 결산·분배 시 '기준가격'은 1,000원 근처로 환원되어 없던 폭락 음봉이 생긴다.
+       → '수정기준가'를 기본으로 쓰고, 괴리가 SETTLE_THRESHOLD 를 넘는 날을 결산일로 표시.
+    3) 원천은 주말·공휴일 행도 있다(경과이자·보수). 기본은 영업일만.
+    필수 컬럼: 처리일자 / 수정기준가(없으면 기준가격). 선택: 기준가격·순자산금액·펀드명
+    """
+    path = find_data_file_glob(workbook_path, "black_chart")
+    if path is None:
+        print("[안내] black_chart.* 없음 — 기준가 차트 탭 생략")
+        return None
+    try:
+        table = _read_table(path)
+    except Exception as e:
+        print(f"[경고] {path.name} 읽기 실패: {type(e).__name__}: {str(e)[:120]}")
+        print("       → 기준가 차트만 생략하고 나머지 대시보드는 정상 생성합니다.")
+        return None
+    if len(table) < 2:
+        print(f"[경고] {path.name} 데이터 없음 — 기준가 차트 생략")
+        return None
+
+    hrow = _find_header_row(table)
+    header = [clean_text(h) for h in table[hrow]]
+    if hrow:
+        print(f"[안내] {path.name}: 헤더를 {hrow + 1}행에서 인식 (상단 {hrow}행은 제목/조회조건으로 건너뜀)")
+
+    def col(*names):
         for i, h in enumerate(header):
-            if h.lower() in names:
+            hs = h.replace(" ", "")
+            if any(n in hs for n in names):
                 return i
         return None
-    ci, ni, xi = col_idx("code", "코드"), col_idx("name", "코드명"), col_idx("class", "유형분류", "유형분류(축소)")
+
+    ci_date = col(*_NAV_COL_GROUPS["date"])
+    ci_adj = col(*_NAV_COL_GROUPS["adj"])
+    ci_raw = col(*_NAV_COL_GROUPS["raw"])
+    ci_aum = col(*_NAV_COL_GROUPS["aum"])
+    ci_name = col(*_NAV_COL_GROUPS["name"])
+    ci_code = col(*_NAV_COL_GROUPS["code"])
+    ci_ann = col(*_NAV_COL_GROUPS["annual"])
+    ci_w1 = col(*_NAV_COL_GROUPS["w1"])
+    ci_m1 = col(*_NAV_COL_GROUPS["m1"])
+    ci_tot = col(*_NAV_COL_GROUPS["total"])
+    if ci_date is None or (ci_adj is None and ci_raw is None):
+        print(f"[경고] {path.name} 에 처리일자/기준가 컬럼을 찾지 못함")
+        print(f"       인식한 헤더({hrow + 1}행): {[h for h in header if h][:10]}")
+        return None
+
+    # 전 펀드 기준가 파일(원본)일 수 있으므로 펀드별로 모은 뒤 대상 펀드만 남긴다.
+    funds, staged = {}, []
+    g = lambda row, i: row[i] if (i is not None and i < len(row)) else None
+    for row in table[hrow + 1:]:
+        if not row or ci_date >= len(row):
+            continue
+        d = _parse_date(row[ci_date])
+        if d is None:
+            continue
+        adj = clean_number(g(row, ci_adj))
+        raw = clean_number(g(row, ci_raw))
+        close = adj if adj else raw
+        if not close:
+            continue
+        fcode = clean_text(g(row, ci_code))
+        fname = clean_text(g(row, ci_name))
+        key = fcode or fname or "_"
+        funds.setdefault(key, fname)
+        staged.append((key, d, close, raw, clean_number(g(row, ci_aum)), {
+            "annual": clean_number(g(row, ci_ann)),
+            "w1": clean_number(g(row, ci_w1)),
+            "m1": clean_number(g(row, ci_m1)),
+            "total": clean_number(g(row, ci_tot)),
+        }))
+    if not staged:
+        print(f"[경고] {path.name} 유효 행 없음")
+        return None
+
+    if len(funds) > 1:
+        pick = _pick_fund(funds, target_code, target_name)
+        print(f"[안내] {path.name}: {len(funds)}개 펀드가 섞여 있어 '{funds[pick] or pick}' 만 사용합니다")
+        staged = [s for s in staged if s[0] == pick]
+        if not staged:
+            print(f"[경고] 대상 펀드 데이터가 없습니다 (펀드: {list(funds.values())[:5]})")
+            return None
+        fund_name = funds[pick]
+    else:
+        fund_name = next(iter(funds.values()), "")
+
+    recs = {d: {"d": d, "close": close, "raw": raw, "aum": aum, "src": srcm}
+            for _, d, close, raw, aum, srcm in staged}
+
+    days = sorted(recs)
+    # 결산일 탐지: 기준가격과 수정기준가의 일간 변동률 괴리 (원본 기준가가 있을 때만)
+    settle = set()
+    if ci_adj is not None and ci_raw is not None:
+        for i in range(1, len(days)):
+            p, c = recs[days[i - 1]], recs[days[i]]
+            if not (p["raw"] and c["raw"] and p["close"] and c["close"]):
+                continue
+            r_raw = (c["raw"] / p["raw"] - 1) * 100
+            r_adj = (c["close"] / p["close"] - 1) * 100
+            if abs(r_raw - r_adj) > SETTLE_THRESHOLD:
+                settle.add(days[i])
+
+    if not include_weekends:                      # 영업일만 (시가=전일종가라 수익률은 보존)
+        days = [d for d in days if d.weekday() < 5]
+    if len(days) < 2:
+        print(f"[경고] {path.name} 영업일 데이터 부족")
+        return None
+
+    dates, opens, closes, aums, settle_idx = [], [], [], [], []
+    prev = None
+    for i, d in enumerate(days):
+        c = recs[d]["close"]
+        dates.append(d.isoformat())
+        opens.append(round(prev if prev is not None else c, 4))    # 시가 = 전일 종가
+        closes.append(round(c, 4))
+        aums.append(recs[d]["aum"])
+        if d in settle:
+            settle_idx.append(i)
+        prev = c
+    ma = {str(n): _sma(closes, n) for n in (10, 20, 30)}
+
+    # MDD: 설정 이후 전 구간, 수정기준가 기준 min(종가/누적최고 - 1)
+    peak, mdd = float("-inf"), 0.0
+    for c in closes:
+        peak = max(peak, c)
+        if peak > 0:
+            mdd = min(mdd, c / peak - 1)
+    # [주의] 원천의 'N주/N개월실현수익률' 은 연환산(단순) 값이다.
+    #   검증: 1개월 원수익률 -11.77% x 365/30 = -143.15% = 원천값. 3개월/1주도 소수점까지 일치.
+    #   카드에 '1달 수익률 -143%' 가 뜨면 오해를 부르므로, 원천과 같은 달력 창으로 '원수익률'을 직접 계산한다.
+    #   (원천 창 = 기준일 - N일, 해당일이 없으면 그 이전 최근일. 주말 포함 원계열로 맞춘다)
+    all_days = sorted(recs)
+    def _ret_back(n_days):
+        tgt = all_days[-1] - timedelta(days=n_days)
+        prior = [d for d in all_days if d <= tgt]
+        if not prior:
+            return None
+        base = recs[prior[-1]]["close"]
+        return round((recs[all_days[-1]]["close"] / base - 1) * 100, 2) if base else None
+
+    last_src = recs[days[-1]]["src"]
+    metrics = {
+        "annual": last_src.get("annual"),        # 원천 제공 (설정 이후 연환산)
+        "mdd": round(mdd * 100, 2),              # 계산 (설정 이후 전 구간, 수정기준가 기준)
+        "w1": _ret_back(7),                      # 계산 (달력 7일, 원수익률)
+        "m1": _ret_back(30),                     # 계산 (달력 30일, 원수익률)
+        "total": last_src.get("total") if last_src.get("total") is not None else round((closes[-1] / 1000 - 1) * 100, 2),
+        "w1Ann": last_src.get("w1"),             # 원천 연환산값 (툴팁용)
+        "m1Ann": last_src.get("m1"),
+    }
+    print(f"[안내] 기준가 이력 {len(dates)}영업일 로드 ({dates[0]} ~ {dates[-1]}"
+          + (f", 결산 {len(settle_idx)}건" if settle_idx else "") + f") — {path.name}")
+    return {
+        "fundName": fund_name, "source": path.name,
+        "dates": dates, "open": opens, "close": closes, "aum": aums,
+        "settleIdx": settle_idx, "ma": ma, "metrics": metrics,
+        "priceType": "수정기준가" if ci_adj is not None else "기준가격",
+    }
+
+
+def _read_cash_sheet(path):
+    """워크북의 'cash' 시트에서 초단기채권 ETF 코드를 읽는다.
+
+    시트 구조: code / name / class  (헤더가 한글이어도 인식). class == '초단기채권' 인 행만.
+    'cash' 시트가 없으면 None 을 반환(다음 후보로 넘어감).
+    """
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    except Exception as ex:
+        print(f"[경고] {path.name} 열기 실패({str(ex)[:60]})")
+        return None
+    sheet = next((s for s in wb.sheetnames if s.strip().lower() == "cash"), None)
+    if sheet is None:
+        return None
+    ws = wb[sheet]
+    rows = ws.iter_rows(values_only=True)
+    try:
+        header = [clean_text(c) for c in next(rows)]
+    except StopIteration:
+        return {}
+
+    def col_idx(*names):
+        for i, h in enumerate(header):
+            if h.lower().replace(" ", "") in names:
+                return i
+        return None
+
+    ci = col_idx("code", "코드", "종목코드")
+    ni = col_idx("name", "코드명", "종목명")
+    xi = col_idx("class", "유형분류", "유형분류(축소)", "유형분류(소)")
     if ci is None or xi is None:
-        print("[경고] cash 시트에 code/class 컬럼을 찾지 못함 — 현금 재분류 생략")
+        print(f"[경고] {path.name}[{sheet}] 에 code/class 컬럼 없음 (헤더: {header[:6]})")
         return {}
     codes = {}
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if xi >= len(row) or ci >= len(row):
+    for row in rows:
+        if not row or xi >= len(row) or ci >= len(row):
             continue
-        cls = clean_text(row[xi])
-        if cls != "초단기채권":
+        if clean_text(row[xi]) != "초단기채권":
             continue
-        code = clean_text(row[ci]).upper().lstrip("A")   # 혹시 접두 A가 있으면 제거
+        code = norm_code(row[ci])
         if code:
-            codes[code] = clean_text(row[ni]) if ni is not None and ni < len(row) else ""
-    print(f"[안내] 초단기채권 ETF {len(codes)}종목 현금 재분류 대상 로드")
+            codes[code] = clean_text(row[ni]) if (ni is not None and ni < len(row)) else ""
     return codes
+
+
+def load_sector_map(workbook_path):
+    """etf_univ.* 의 'sector' 시트에서 종목별 업종명을 읽는다.
+
+    구조: A = 종목명, B = 업종명. (ETF 는 업종명이 빈칸 → 화면에서 'ETF' 로 표기)
+    반환: {공백제거·대문자화한 종목명: 업종명}
+    """
+    path = find_data_file_glob(workbook_path, "etf_univ")
+    if path is None:
+        return {}
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    except Exception as ex:
+        print(f"[경고] etf_univ 열기 실패({str(ex)[:50]}) — 섹터 생략")
+        return {}
+    sheet = next((s for s in wb.sheetnames if s.strip().lower() == "sector"), None)
+    if sheet is None:
+        print(f"[안내] etf_univ 에 'sector' 시트 없음 — 섹터 비중 생략 (시트: {wb.sheetnames})")
+        return {}
+    ws = wb[sheet]
+    out = {}
+    for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        if not row:
+            continue
+        nm = clean_text(row[0] if len(row) > 0 else "")
+        if not nm:
+            continue
+        if i == 1 and ("종목" in nm or nm.lower() in ("name", "종목명")):
+            continue                                   # 헤더
+        sec = clean_text(row[1]) if len(row) > 1 else ""
+        out[norm_name(nm)] = sec
+    print(f"[안내] 섹터 매핑 {len(out)}종목 로드 ({path.name}[sector])")
+    return out
+
+
+def load_cash_etf_codes(workbook_path, etf_univ=None):
+    """현금성(초단기채권) ETF 코드 목록.
+
+    우선순위
+      1) data/etf_univ.* 의 'cash' 시트          ← 현재 운영 방식
+      2) data/cash_etf.* 의 'cash' 시트          ← 하위호환(구 파일이 남아 있을 때)
+      3) etf_univ 의 'etf' 시트 유형분류에 '초단기채권' 포함 → 자동 유추
+    """
+    for stem in ("etf_univ", "cash_etf"):
+        path = find_data_file_glob(workbook_path, stem)
+        if path is None:
+            continue
+        codes = _read_cash_sheet(path)
+        if codes is not None:
+            print(f"[안내] 초단기채권 ETF {len(codes)}종목 현금 재분류 대상 로드 ({path.name}[cash])")
+            return codes
+
+    if etf_univ:                       # 폴백: 유형분류(대/중/소) 어딘가에 '초단기채권'
+        codes = {c: v.get("name", "") for c, v in etf_univ.items()
+                 if "초단기채권" in (v.get("l1", "") + v.get("l2", "") + v.get("l3", ""))}
+        if codes:
+            print(f"[안내] 초단기채권 ETF {len(codes)}종목 현금 재분류 대상 로드 (etf_univ[etf] 유형분류 기준)")
+            return codes
+    print("[안내] 초단기채권 ETF 목록 없음 — 현금 재분류 생략")
+    return {}
 
 
 def reconcile(cats, totals, tol_weight=0.005, tol_value_ratio=0.001):
@@ -458,8 +1101,14 @@ def build_data(workbook_path: Path):
     wb, raw = load_safe(workbook_path)
     sheet_name = wb.sheetnames[0]  # 통합 단일시트
     ws = wb[sheet_name]
-    cash_etf_codes = load_cash_etf_codes(workbook_path.parent)
-    cats, unclassified, reclassified_cash = read_sheet1(ws, cash_etf_codes)
+    etf_univ = load_etf_universe(workbook_path)
+    cash_etf_codes = load_cash_etf_codes(workbook_path, etf_univ)
+    sector_map = load_sector_map(workbook_path)
+    cats, unclassified, reclassified_cash = read_sheet1(ws, cash_etf_codes, etf_univ, sector_map)
+    # 기준가 이력: 워크북의 펀드코드/펀드명으로 대상 펀드를 특정 (전 펀드 파일 대비)
+    _fc = next((r["fundCode"] for c in cats.values() for r in c if r.get("fundCode")), None)
+    _fn = next((r["fundName"] for c in cats.values() for r in c if r.get("fundName")), None)
+    nav_chart = load_nav_history(workbook_path, target_code=_fc, target_name=_fn)
     nav = derive_nav(cats)
     totals = read_total_row(ws)
     recon_issues = reconcile(cats, totals)
@@ -538,6 +1187,7 @@ def build_data(workbook_path: Path):
         "totalPnl": total_pnl,
         "unclassified": unclassified,
         "reclassifiedCash": reclassified_cash,
+        "navChart": nav_chart,
         "dirConflicts": dir_conflicts,
         "domesticStock": cats["domesticStock"],
         "domesticFutures": cats["domesticFutures"],
@@ -626,12 +1276,54 @@ HTML_TEMPLATE = r"""<!doctype html>
     main { max-width: 1680px; margin: 0 auto; padding: 16px 18px 28px; display: grid; gap: 14px; }
     .notice-bar { display: flex; align-items: center; gap: 10px; background: #1c2530; color: #fff; border: 1px solid #2c3a49; border-radius: 8px; padding: 10px 14px; font-size: 13px; line-height: 1.4; box-shadow: var(--shadow); }
     .notice-bar b { color: #ffd45e; font-weight: 700; }
-    .summary { display: grid; grid-template-columns: repeat(7, minmax(120px, 1fr)); gap: 10px; }
+    /* ---------- 기준가 차트: HTS 관례 다크 네이비 (대시보드 테마와 독립) ---------- */
+    .hts {
+      --hbg: #0e1420; --hpanel: #131a26; --hpanel2: #1a2330; --hline: #223047; --hline2: #161d29;
+      --htext: #d7dde8; --hmute: #7d8798; --hup: #ff2f3f; --hdn: #2f7fff;
+      --hmono: ui-monospace, "SF Mono", Menlo, Consolas, "D2Coding", monospace;
+      background: var(--hpanel); border: 1px solid var(--hline); border-radius: 6px;
+      color: var(--htext); overflow: hidden;
+    }
+    .hts-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px;
+      padding: 12px 14px 10px; border-bottom: 1px solid var(--hline); background: var(--hpanel); }
+    .hts-t .nm { font-size: 13.5px; font-weight: 700; letter-spacing: -.2px; }
+    .hts-t .src { display: block; font-size: 10.5px; color: var(--hmute); margin-top: 3px; font-family: var(--hmono); }
+    .hts-px { text-align: right; white-space: nowrap; }
+    .hts-px .v { font-size: 24px; font-weight: 800; font-family: var(--hmono); }
+    .hts-px .c { font-size: 12.5px; font-weight: 700; font-family: var(--hmono); margin-left: 8px; }
+    .hts-bar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
+      padding: 7px 14px; background: var(--hpanel2); border-bottom: 1px solid var(--hline); }
+    .hts-legend { display: flex; gap: 6px; flex-wrap: wrap; font-family: var(--hmono); font-size: 11px; }
+    .hts-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 3px;
+      background: var(--hbg); border: 1px solid var(--hline2); color: var(--hmute); white-space: nowrap; }
+    .hts-chip b { color: var(--htext); font-weight: 700; }
+    .hts-chip .dot { width: 8px; height: 2.5px; border-radius: 1px; display: inline-block; }
+    .hts-chip.on { border-color: #35507a; background: #16202e; }
+    .hts-ctrl { display: flex; gap: 12px; }
+    .hts-btns { display: flex; gap: 3px; }
+    .hts-btn { all: unset; cursor: pointer; padding: 3px 10px; border: 1px solid var(--hline); border-radius: 3px;
+      font-size: 11px; font-weight: 700; color: var(--hmute); background: var(--hbg); font-family: var(--hmono); }
+    .hts-btn:hover { color: var(--htext); border-color: #35507a; }
+    .hts-btn.on { background: #1d2637; color: #fff; border-color: #35507a; }
+    .hts-wrap { position: relative; width: 100%; background: var(--hbg); }
+    #navCanvas { display: block; width: 100%; cursor: crosshair; touch-action: none; }
+    .hts-foot { padding: 6px 14px; font-size: 10.5px; color: var(--hmute); background: var(--hpanel2);
+      border-top: 1px solid var(--hline); font-family: var(--hmono); }
+    .nav-tip { position: absolute; pointer-events: none; display: none; background: rgba(10,15,24,.96);
+      border: 1px solid #35507a; border-radius: 4px; padding: 7px 9px; font-size: 11.5px; line-height: 1.65;
+      white-space: nowrap; z-index: 3; font-family: var(--hmono); color: #d7dde8; box-shadow: 0 6px 18px rgba(0,0,0,.6); }
+    .nav-tip .d { color: #ffd45e; font-weight: 700; margin-bottom: 3px; }
+    .nav-tip .row { display: flex; justify-content: space-between; gap: 16px; }
+    .nav-tip .row.hi { background: #1d2637; margin: 0 -4px; padding: 0 4px; border-radius: 2px; }
+    .nav-tip .row .k { color: #7d8798; }
+    .nav-tip .row .v { font-weight: 600; }
+    .nav-empty { padding: 40px; text-align: center; color: var(--hmute); }
+    .summary { display: grid; grid-template-columns: repeat(5, minmax(140px, 1fr)); gap: 10px; }
     .metric, .panel { background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); }
-    .metric { padding: 11px 12px; min-height: 70px; }
-    .metric .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-    .metric .value { font-size: 19px; font-weight: 700; color: var(--text); }
-    .metric .sub { font-size: 11px; color: var(--muted); margin-top: 2px; font-weight: 600; }
+    .metric { padding: 13px 14px; min-height: 84px; border-color: var(--line-strong); }
+    .metric .label { color: var(--amber); font-size: 13px; font-weight: 700; letter-spacing: .02em; margin-bottom: 7px; }
+    .metric .value { font-size: 25px; font-weight: 800; color: var(--text); line-height: 1.2; font-variant-numeric: tabular-nums; }
+    .metric .sub { font-size: 12px; color: #a8a49a; margin-top: 4px; font-weight: 600; line-height: 1.35; }
     .metric.bad .value { color: var(--bad); } .metric.ok .value { color: var(--ok); }
     .panel { overflow: hidden; }
     .panel-head {
@@ -672,11 +1364,24 @@ HTML_TEMPLATE = r"""<!doctype html>
     .opt-pill.up { color: var(--ok); background: var(--soft-ok); }
     .opt-pill.down { color: var(--bad); background: var(--soft-bad); }
     .opt-pill.flat { color: var(--muted); background: #eef1f5; }
+    .etf-chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 700; }
+    .etf-chip.etf { color: #9ecbe8; background: #14293a; }
+    .etf-chip.stk { color: #ffc46b; background: #33260f; }
     .deriv-line { line-height: 1.9; }
     .deriv-line + .deriv-line { margin-top: 2px; padding-top: 2px; border-top: 1px dashed var(--line); }
     tfoot td { position: sticky; bottom: 0; background: #000; font-weight: 700; color: var(--amber); border-top: 2px solid var(--amber); }
     .delete-row { width: 30px; padding: 0; }
-    .grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr); gap: 14px; }
+    .grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr); gap: 14px; align-items: start; }
+    .sec-row { display: grid; grid-template-columns: minmax(120px, 170px) minmax(0, 1fr) 62px 78px; gap: 10px;
+      align-items: center; padding: 4px 2px; border-radius: 4px; }
+    .sec-row:hover { background: var(--panel-2); }
+    .sec-nm { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sec-track { height: 15px; background: #1a1a1a; border-radius: 3px; overflow: hidden; border: 1px solid var(--line); }
+    .sec-fill { height: 100%; border-radius: 2px 0 0 2px; }
+    .sec-pct, .sec-eok { font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+    .sec-pct { font-weight: 700; }
+    .sec-eok { color: var(--muted); }
+    .sec-foot { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--muted); }
     .chart-layout { display: grid; grid-template-columns: minmax(460px, 1.6fr) minmax(300px, max-content); gap: 18px; align-items: center; }
     .alloc-detail { border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); min-height: 120px; }
     .alloc-detail-empty { padding: 18px 14px; color: var(--muted); font-size: 12.5px; text-align: center; }
@@ -698,16 +1403,18 @@ HTML_TEMPLATE = r"""<!doctype html>
     .mini-table td.center { text-align: center; }
     .alloc-close { all: unset; cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 700; padding: 0 4px; border-radius: 4px; }
     .alloc-close:hover { color: var(--bad); background: var(--soft-bad); }
-    #allocPie path.seg { cursor: pointer; transition: opacity .12s, filter .12s; }
-    #allocPie path.seg:hover { opacity: .9; filter: brightness(1.12); }
-    #allocPie path.seg.selected { stroke: #ffd45e; stroke-width: 3.5; filter: brightness(1.15) drop-shadow(0 0 8px rgba(255,160,40,0.6)); }
+    .pie-wrap path.seg { cursor: pointer; transition: opacity .12s, filter .12s; }
+    .pie-wrap path.seg:hover { opacity: .9; filter: brightness(1.12); }
+    .pie-wrap path.seg.selected { stroke: #ffd45e; stroke-width: 3.5; filter: brightness(1.15) drop-shadow(0 0 8px rgba(255,160,40,0.6)); }
     .pie-wrap { display: grid; justify-items: center; gap: 9px; }
     .pie-label-in { font-weight: 700; }
-    .pie-label-out { font-size: 16px; font-weight: 600; fill: var(--text); }
+    .pie-label-out { font-weight: 700; fill: var(--text); }   /* 크기는 viewBox 배율에 맞춰 JS 에서 지정 */
     .pie-leader { stroke: var(--line-strong); stroke-width: 1; fill: none; }
     .legend { display: grid; gap: 4px; align-content: center; }
     .legend-item { display: grid; grid-template-columns: 12px 1fr 64px 84px; align-items: center; gap: 8px; font-size: 13px; padding: 5px 8px; border-radius: 6px; }
     .legend-item:hover { background: var(--panel-2); }
+    .pie-back { all: unset; cursor: pointer; display: inline-block; padding: 6px 12px; margin-bottom: 6px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--amber); font-weight: 700; font-size: 12.5px; background: var(--panel-2); }
+    .pie-back:hover { background: #2a2010; border-color: var(--amber); }
     .legend-swatch { width: 12px; height: 12px; border-radius: 3px; }
     .legend-label { white-space: nowrap; font-weight: 600; }
     .legend-pct { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
@@ -734,6 +1441,8 @@ HTML_TEMPLATE = r"""<!doctype html>
       </div>
       <div class="main-menu" id="mainMenu">
         <button class="menu-btn active" type="button" data-view="overview">개요</button>
+        <button class="menu-btn" type="button" data-view="navchart">기준가 차트</button>
+        <button class="menu-btn" type="button" data-view="sector">섹터</button>
         <button class="menu-btn" type="button" data-view="holdings">보유내역</button>
         <button class="menu-btn" type="button" data-view="pnl">손익</button>
         <button class="menu-btn" type="button" data-view="exposure">선물 · 옵션 익스포저</button>
@@ -750,13 +1459,39 @@ HTML_TEMPLATE = r"""<!doctype html>
       <span><b>장 마감 전</b> 대시보드를 이용하는 경우 실시간 시세를 반영하지 못해 평가액·수익률은 정확하지 않을 수 있습니다. 포지션 파악 용도로만 활용하세요.</span>
     </div>
     <section class="summary view" id="viewSummary" aria-label="요약">
-      <div class="metric"><div class="label">펀드 NAV</div><div class="value" id="mNav">-</div><div class="sub" id="mNavSub"></div></div>
+      <div class="metric"><div class="label">연환산 수익률</div><div class="value" id="mAnnual">-</div><div class="sub" id="mAnnualSub"></div></div>
+      <div class="metric"><div class="label">MDD</div><div class="value" id="mMdd">-</div><div class="sub" id="mMddSub"></div></div>
+      <div class="metric"><div class="label">1주 수익률</div><div class="value" id="mW1">-</div><div class="sub" id="mW1Sub"></div></div>
+      <div class="metric"><div class="label">1달 수익률</div><div class="value" id="mM1">-</div><div class="sub" id="mM1Sub"></div></div>
       <div class="metric" id="mPnlBox"><div class="label">총 평가손익</div><div class="value" id="mPnl">-</div><div class="sub" id="mPnlSub"></div></div>
-      <div class="metric"><div class="label">종목 수 (주식)</div><div class="value" id="mCount">-</div><div class="sub" id="mCountSub"></div></div>
-      <div class="metric" id="mNetBox"><div class="label">주식 순노출</div><div class="value" id="mNet">-</div><div class="sub" id="mNetSub"></div></div>
-      <div class="metric"><div class="label">파생 노출 (NAV 대비)</div><div class="value" id="mDeriv">-</div><div class="sub" id="mDerivSub"></div></div>
-      <div class="metric"><div class="label">그로스 익스포저</div><div class="value" id="mGross">-</div><div class="sub" id="mGrossSub"></div></div>
-      <div class="metric"><div class="label">현금 · 현금성 · 증거금</div><div class="value" id="mCash">-</div><div class="sub" id="mCashSub"></div></div>
+    </section>
+
+    <section class="view view-hidden" id="viewNavChart">
+      <div class="hts">
+        <div class="hts-head">
+          <div class="hts-t">
+            <span class="nm" id="navFundName">-</span>
+            <span class="src" id="navChartMeta"></span>
+          </div>
+          <div class="hts-px">
+            <span class="v" id="navPx">-</span>
+            <span class="c" id="navChg"></span>
+          </div>
+        </div>
+        <div class="hts-bar">
+          <div class="hts-legend" id="navLegend"></div>
+          <div class="hts-ctrl">
+            <div class="hts-btns" id="navFreqBtns"></div>
+            <div class="hts-btns" id="navRangeBtns"></div>
+            <div class="hts-btns" id="navMaBtns"></div>
+          </div>
+        </div>
+        <div class="hts-wrap" id="navWrap">
+          <canvas id="navCanvas"></canvas>
+          <div class="nav-tip" id="navTip"></div>
+        </div>
+        <div class="hts-foot" id="navFoot"></div>
+      </div>
     </section>
 
     <section class="grid-2 view" id="viewOverview">
@@ -774,6 +1509,27 @@ HTML_TEMPLATE = r"""<!doctype html>
       <section class="panel" id="allocDetailPanel">
         <div class="panel-head"><span>자산군 요약</span><span class="muted">다이어그램 항목 클릭</span></div>
         <div class="panel-body"><div class="alloc-detail" id="allocDetail"></div></div>
+      </section>
+    </section>
+
+    <section class="grid-2 view view-hidden" id="viewSector">
+      <section class="panel">
+        <div class="panel-head">
+          <span>섹터 비중 <span class="muted" id="sectorHint" style="font-weight:500;"></span></span>
+          <span style="display:inline-flex;gap:4px;" id="sectorScope"></span>
+        </div>
+        <div class="panel-body">
+          <div class="chart-layout">
+            <div class="pie-wrap">
+              <svg id="sectorPie" viewBox="-150 0 1220 760" role="img" aria-label="섹터 비중 파이" style="width:100%;max-width:1100px;display:block;margin:0 auto;"></svg>
+            </div>
+            <div class="legend" id="sectorLegend"></div>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><span>섹터 구성 종목</span><span class="muted">다이어그램 항목 클릭</span></div>
+        <div class="panel-body"><div class="alloc-detail" id="sectorDetail"></div></div>
       </section>
     </section>
 
@@ -843,12 +1599,13 @@ HTML_TEMPLATE = r"""<!doctype html>
     const isFut = (t) => t === "domesticFutures" || t === "overseasFutures";
     const isOpt = (t) => t === "options";
 
-    const state = { view: "overview", allocSel: null, assetTab: "domesticStock", search: "", group: "all", viewMode: "simple",
+    const state = { view: "overview", allocSel: null, allocDrill: null, assetTab: "domesticStock", search: "", group: "all", viewMode: "simple",
       assets: { domesticStock: [], domesticFutures: [], overseasStock: [], overseasFutures: [], options: [] } };
 
     document.addEventListener("DOMContentLoaded", init);
 
     function init() {
+      initNavChart();
       // 기준일: 파일명 YYYYMMDD > 워크북 수정일. 배지로 강조
       const dm = (DATA.workbook || "").match(/(20\d{2})[._-]?(\d{2})[._-]?(\d{2})/);
       const baseDate = dm ? `${dm[1]}-${dm[2]}-${dm[3]}` : (DATA.workbookModifiedAt || "").slice(0, 10);
@@ -892,6 +1649,8 @@ HTML_TEMPLATE = r"""<!doctype html>
         qty: h.qty, qty0: h.qty, price: h.price, value0: h.value,
         cost0: (h.prevValue != null && h.pnl != null) ? h.prevValue - h.pnl : null,
         weightPrev: h.weightPrev,
+        isEtf: !!h.isEtf, etfL1: h.etfL1 || "", etfL2: h.etfL2 || "", etfL3: h.etfL3 || "",
+        sector: h.sector || "",
       };
     }
     function mapFut(h) {
@@ -993,11 +1752,12 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     // ---- 이벤트 ----
-    const VIEW_IDS = { overview: "viewOverview", holdings: "viewHoldings", exposure: "viewExposure", pnl: "viewPnl" };
+    const VIEW_IDS = { overview: "viewOverview", navchart: "viewNavChart", sector: "viewSector", holdings: "viewHoldings", exposure: "viewExposure", pnl: "viewPnl" };
     function applyView() {
       document.querySelectorAll("#mainMenu .menu-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === state.view));
       Object.entries(VIEW_IDS).forEach(([v, id]) => document.getElementById(id).classList.toggle("view-hidden", v !== state.view));
       document.getElementById("viewSummary").classList.toggle("view-hidden", state.view !== "overview");
+      if (state.view === "navchart") drawNavCanvas();
     }
 
     function bindEvents() {
@@ -1033,6 +1793,8 @@ HTML_TEMPLATE = r"""<!doctype html>
       renderMetrics();
       renderAlloc();
       renderNetting();
+      renderSector();
+      renderNavChart();
       renderPnl();
       applyViewMode();
       applyFilters();
@@ -1210,47 +1972,31 @@ HTML_TEMPLATE = r"""<!doctype html>
     // ---- 좌측 패널 ----
     // ---- 메트릭/차트 ----
     function renderMetrics() {
-      const ds = activeList("domesticStock").map(liveStock);
-      const os = activeList("overseasStock").map(liveStock);
-      const domVal = sum(ds.map((c) => c.value));
-      const ovsVal = sum(os.map((c) => c.value));
-      const stockVal = domVal + ovsVal;
-      const df = activeList("domesticFutures").map(liveFut);
-      const of = activeList("overseasFutures").map(liveFut);
-      const op = activeList("options").map(liveOpt);
-      const futNet = sum(df.map((c) => dirSign(c.direction) * c.valueAbs)) + sum(of.map((c) => dirSign(c.direction) * c.valueAbs));
-      const futGross = sum(df.map((c) => c.valueAbs)) + sum(of.map((c) => c.valueAbs));
-      const optPrem = sum(op.map((c) => c.valueAbs));
-      const cashEtfPnl = sum((DATA.cashOther || []).filter((r) => r.isCashEtf).map((r) => r.pnl || 0));
-      const pnl = sum(ds.map((c) => c.pnl || 0)) + sum(os.map((c) => c.pnl || 0)) + sum(df.map((c) => c.pnl || 0)) + sum(of.map((c) => c.pnl || 0)) + sum(op.map((c) => c.pnl || 0)) + cashEtfPnl;
-      const cnt = TABS.reduce((a, t) => a + activeCount(t), 0);
+      const C = DATA.navChart, m = (C && C.metrics) || {};
+      const pct = (v) => (v == null ? "-" : (v >= 0 ? "+" : "") + v.toFixed(2) + "%");
+      const cls = (el, v) => { el.className = "value" + (v == null ? "" : (v >= 0 ? " ret-pos" : " ret-neg")); };
+      const set = (id, v, sub) => {
+        const el = document.getElementById(id);
+        el.textContent = pct(v); cls(el, v);
+        document.getElementById(id + "Sub").textContent = sub || "";
+      };
+      const noData = "기준가 이력 없음";
+      set("mAnnual", m.annual, C ? "설정 이후 · 원천 제공" : noData);
+      set("mMdd", m.mdd, C ? "설정 이후 · 수정기준가 기준" : noData);
+      set("mW1", m.w1, C ? (m.w1Ann != null ? `달력 7일 · 연환산 ${m.w1Ann.toFixed(1)}%` : "달력 7일") : noData);
+      set("mM1", m.m1, C ? (m.m1Ann != null ? `달력 30일 · 연환산 ${m.m1Ann.toFixed(1)}%` : "달력 30일") : noData);
+
       const nav = DATA.nav || 1;
-
-      // 주식 순노출 = 주식 롱 + 선물 순 (선물까지 고려한 포지션)
-      const equityNet = stockVal + futNet;
-      // 그로스 = 주식 + 선물 노셔널 + 옵션 프리미엄 (총계 행 col31 정의와 동일)
-      const gross = stockVal + futGross + optPrem;
-
-      document.getElementById("mNav").textContent = formatEok(DATA.nav);
-      document.getElementById("mNavSub").textContent = DATA.navSource || "";
-      document.getElementById("mPnl").textContent = formatEok(pnl);
-      document.getElementById("mPnlBox").className = "metric " + (pnl >= 0 ? "ok" : "bad");
-      document.getElementById("mPnlSub").textContent = "주식+선물+옵션 · 현금성 제외";
-      const stockCnt = activeCount("domesticStock") + activeCount("overseasStock");   // ETF도 1종목
-      document.getElementById("mCount").textContent = stockCnt.toLocaleString("ko-KR") + "개";
-      document.getElementById("mCountSub").textContent = `국내 ${activeCount("domesticStock")} · 해외 ${activeCount("overseasStock")} (ETF 포함, 선물·옵션 제외)`;
-      document.getElementById("mNet").textContent = formatPct(equityNet / nav);
-      document.getElementById("mNetSub").textContent = `${formatEok(equityNet)} · 주식 ${formatPct(stockVal / nav)} + 선물순 ${formatPct(futNet / nav)}`;
-      document.getElementById("mDeriv").textContent = formatPct((futGross + optPrem) / nav);
-      document.getElementById("mDerivSub").textContent = `선물 ${formatPct(futGross / nav)} (${formatEok(futGross)}) · 옵션 ${formatPct(optPrem / nav)} (${formatEok(optPrem)})`;
-      document.getElementById("mNetBox").className = "metric " + (equityNet >= 0 ? "ok" : "bad");
-      document.getElementById("mGross").textContent = formatPct(gross / nav);
-      document.getElementById("mGrossSub").textContent = `${formatEok(gross)}${DATA.totalsRow && DATA.totalsRow.weight ? " · 총계행 " + formatPct(DATA.totalsRow.weight) : ""}`;
-      document.getElementById("mCash").textContent = formatEok((DATA.pureCashValue || 0) + (DATA.cashEquivValue || 0) + (DATA.marginValue || 0));
-      document.getElementById("mCashSub").textContent = `현금 ${formatEok(DATA.pureCashValue)} · 현금성 ${formatEok(DATA.cashEquivValue)} · 증거금 ${formatEok(DATA.marginValue)}`;
+      const pnl = DATA.totalPnl;
+      const pnlEl = document.getElementById("mPnl");
+      pnlEl.textContent = pnl == null ? "-" : formatEok(pnl);
+      pnlEl.className = "value" + (pnl == null ? "" : (pnl >= 0 ? " ret-pos" : " ret-neg"));
+      document.getElementById("mPnlSub").textContent =
+        (pnl == null ? "" : `NAV 대비 ${formatPct(pnl / nav)} · 주식·선물·옵션·현금성`);
+      const box = document.getElementById("mPnlBox");
+      if (box) box.title = "예금·증거금 제외, 현금성 ETF 포함";
     }
 
-    // ---- SVG 파이 (가득 찬 원 + 내부 라벨, 좁은 조각은 리더라인) ----
     const SVGNS = "http://www.w3.org/2000/svg";
     function _el(tag, attrs) {
       const e = document.createElementNS(SVGNS, tag);
@@ -1258,37 +2004,52 @@ HTML_TEMPLATE = r"""<!doctype html>
       return e;
     }
     const PIE_SHADE = { domestic: ["#ffb347", "#e07d00"], overseas: ["#e0900f", "#9c5f08"], domesticFut: ["#a56a16", "#6e470d"], overseasFut: ["#75603a", "#463719"], opt: ["#ff5f63", "#c1373b"], cash: ["#4a4a4a", "#2b2b2b"] };
-    function _pieDefs(keys) {
+    // 드릴다운 팔레트: 개별종목=앰버 계열 / ETF=스틸블루 계열 (순서에 따라 명도 변화)
+    function pieShadeFor(isEtf, i, n) {
+      const t = n > 1 ? i / (n - 1) : 0;
+      const hue = isEtf ? 205 : 33, sat = isEtf ? 45 : 92;
+      return [`hsl(${hue}, ${sat}%, ${(68 - t * 32).toFixed(1)}%)`, `hsl(${hue}, ${sat}%, ${(46 - t * 24).toFixed(1)}%)`];
+    }
+    function pieTextFor(isEtf, i, n) {
+      const t = n > 1 ? i / (n - 1) : 0;
+      return (68 - t * 32) > 52 ? "#0a0a0a" : "#ffffff";
+    }
+    function _pieDefs(parts, uid) {
       const ns = "http://www.w3.org/2000/svg";
       const defs = document.createElementNS(ns, "defs");
       // 조각별 방사형 그라디언트 (안쪽 밝게 → 바깥 어둡게)
-      keys.forEach((k) => {
+      parts.forEach((p, idx) => {
         const g = document.createElementNS(ns, "radialGradient");
-        g.setAttribute("id", "pieG_" + k);
+        g.setAttribute("id", `pieG_${uid}_${idx}`);   // SVG 별 고유 id (문서 내 중복 시 참조가 깨져 fill 이 사라짐)
         g.setAttribute("cx", "50%"); g.setAttribute("cy", "50%"); g.setAttribute("r", "72%");
-        const sh = PIE_SHADE[k] || ["#888", "#555"];
+        const sh = p.shade || PIE_SHADE[p.key] || ["#888", "#555"];
         const s1 = document.createElementNS(ns, "stop"); s1.setAttribute("offset", "35%"); s1.setAttribute("stop-color", sh[0]);
         const s2 = document.createElementNS(ns, "stop"); s2.setAttribute("offset", "100%"); s2.setAttribute("stop-color", sh[1]);
         g.appendChild(s1); g.appendChild(s2); defs.appendChild(g);
       });
       // 드롭 섀도 필터
       const f = document.createElementNS(ns, "filter");
-      f.setAttribute("id", "pieShadow"); f.setAttribute("x", "-20%"); f.setAttribute("y", "-20%"); f.setAttribute("width", "140%"); f.setAttribute("height", "140%");
+      f.setAttribute("id", `pieShadow_${uid}`); f.setAttribute("x", "-20%"); f.setAttribute("y", "-20%"); f.setAttribute("width", "140%"); f.setAttribute("height", "140%");
       f.innerHTML = '<feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.55"/>';
       defs.appendChild(f);
       // 홀 내부 은은한 글로우
       const hg = document.createElementNS(ns, "radialGradient");
-      hg.setAttribute("id", "pieHoleGlow"); hg.setAttribute("cx", "50%"); hg.setAttribute("cy", "42%"); hg.setAttribute("r", "60%");
+      hg.setAttribute("id", `pieHoleGlow_${uid}`); hg.setAttribute("cx", "50%"); hg.setAttribute("cy", "42%"); hg.setAttribute("r", "60%");
       hg.innerHTML = '<stop offset="0%" stop-color="#ffa028" stop-opacity="0.18"/><stop offset="100%" stop-color="#0a0a0a" stop-opacity="0"/>';
       defs.appendChild(hg);
       return defs;
     }
-    function drawPieSVG(svg, parts, total, nav) {
+    function drawPieSVG(svg, parts, total, nav, opts) {
+      opts = opts || {};
       svg.innerHTML = "";
       const CX = 460, CY = 380, R = 310;
-      svg.appendChild(_pieDefs(parts.map((p) => p.key)));
+      const uid = svg.id || "pie";
+      // viewBox 가 넓을수록 화면에서 축소되므로 리더라인 라벨 크기를 그만큼 키워 보정
+      const vbw = parseFloat((svg.getAttribute("viewBox") || "0 0 920 760").split(/\s+/)[2]) || 920;
+      const lblFs = Math.round(17 * (vbw / 920)), lblGap = Math.round(lblFs * 1.55);
+      svg.appendChild(_pieDefs(parts, uid));
       // 바닥 그림자용 원반 (입체 받침)
-      svg.appendChild(_el("circle", { cx: CX, cy: CY + 4, r: R, fill: "#000000", opacity: "0.35", filter: "url(#pieShadow)" }));
+      svg.appendChild(_el("circle", { cx: CX, cy: CY + 4, r: R, fill: "#000000", opacity: "0.35", filter: `url(#pieShadow_${uid})` }));
       let ang = -90;                         // 12시 방향 시작
       const outLabels = [];
       const MIN_FS = 17, MAX_FS = 26;
@@ -1308,7 +2069,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       const fsName = insideFits.length ? Math.min(MAX_FS, Math.min.apply(null, insideFits)) : MAX_FS;
       const fsPct = Math.max(15, fsName - 4);
       // 2-pass: 렌더 (내부 라벨은 전부 동일 크기)
-      metas.forEach(({ p, sweep, name, inside }) => {
+      metas.forEach(({ p, sweep, name, inside }, _i) => {
         const a0 = ang * Math.PI / 180, a1 = (ang + sweep) * Math.PI / 180;
         const mid = (ang + sweep / 2) * Math.PI / 180;
         const x0 = CX + R * Math.cos(a0), y0 = CY + R * Math.sin(a0);
@@ -1317,31 +2078,55 @@ HTML_TEMPLATE = r"""<!doctype html>
         const path = sweep >= 359.99
           ? `M ${CX - R} ${CY} A ${R} ${R} 0 1 1 ${CX + R} ${CY} A ${R} ${R} 0 1 1 ${CX - R} ${CY} Z`
           : `M ${CX} ${CY} L ${x0} ${y0} A ${R} ${R} 0 ${large} 1 ${x1} ${y1} Z`;
-        const seg = _el("path", { d: path, fill: `url(#pieG_${p.key})`, stroke: "#0a0a0a", "stroke-width": 2, class: "seg" + (state.allocSel === p.key ? " selected" : ""), "data-key": p.key });
-        seg.addEventListener("click", () => { state.allocSel = (state.allocSel === p.key) ? null : p.key; renderAlloc(); });
-        svg.appendChild(seg);
+        const isSel = opts.selKey !== undefined ? (opts.selKey === p.key) : (!opts.level2 && state.allocSel === p.key);
+        const seg = _el("path", { d: path, fill: `url(#pieG_${uid}_${_i})`, stroke: "#0a0a0a", "stroke-width": opts.level2 ? 1 : 2, class: "seg" + (isSel ? " selected" : ""), "data-key": p.key });
         const pctTxt = formatPct(p.val / nav);
+        if (opts.onPick) {                        // 외부 클릭 핸들러 (섹터 파이)
+          const ttl = document.createElementNS("http://www.w3.org/2000/svg", "title");
+          ttl.textContent = `${p.label} · ${pctTxt} · ${formatEok(p.val)}`;
+          seg.appendChild(ttl);
+          seg.addEventListener("click", () => opts.onPick(p));
+        } else if (opts.level2) {
+          const ttl = document.createElementNS("http://www.w3.org/2000/svg", "title");
+          ttl.textContent = `${p.label} · ${pctTxt} · ${formatEok(p.val)}${p.isEtf ? " · ETF" : ""}`;
+          seg.appendChild(ttl);
+          seg.style.cursor = "default";
+        } else {
+          seg.addEventListener("click", () => {
+            const k = p.key;
+            if (state.allocSel === k) { state.allocSel = null; state.allocDrill = null; }
+            else { state.allocSel = k; state.allocDrill = (k === "domestic" || k === "overseas") ? k : null; }
+            renderAlloc();
+          });
+        }
+        svg.appendChild(seg);
         if (inside) {
           const lx = CX + lr * Math.cos(mid), ly = CY + lr * Math.sin(mid);
-          const t = _el("text", { x: lx, y: ly - fsName * 0.32, "text-anchor": "middle", class: "pie-label-in", fill: CHART_TEXT[p.key], "pointer-events": "none", "font-size": fsName });
+          const t = _el("text", { x: lx, y: ly - fsName * 0.32, "text-anchor": "middle", class: "pie-label-in", fill: p.text || CHART_TEXT[p.key], "pointer-events": "none", "font-size": fsName });
           t.textContent = name;
-          const t2 = _el("text", { x: lx, y: ly + fsPct * 1.05, "text-anchor": "middle", class: "pie-label-in", fill: CHART_TEXT[p.key], "pointer-events": "none", "font-size": fsPct });
+          const t2 = _el("text", { x: lx, y: ly + fsPct * 1.05, "text-anchor": "middle", class: "pie-label-in", fill: p.text || CHART_TEXT[p.key], "pointer-events": "none", "font-size": fsPct });
           t2.textContent = pctTxt;
           svg.appendChild(t); svg.appendChild(t2);
-        } else {
-          outLabels.push({ mid, key: p.key, label: `${name} ${pctTxt}` });
+        } else if (!opts.level2) {
+          outLabels.push({ mid, key: p.key, label: `${name} ${pctTxt}`, part: p });
         }
         ang += sweep;
       });
       // 중앙 도넛 홀 (입체 + 정보 표시)
       const holeR = R * 0.42;
       svg.appendChild(_el("circle", { cx: CX, cy: CY, r: holeR, fill: "#0a0a0a", stroke: "#2a2a2a", "stroke-width": 1.5 }));
-      svg.appendChild(_el("circle", { cx: CX, cy: CY, r: holeR, fill: "url(#pieHoleGlow)", opacity: "0.6" }));
-      const navLabel = _el("text", { x: CX, y: CY - 10, "text-anchor": "middle", "font-size": 20, "font-weight": "700", fill: "#8a877f", "pointer-events": "none" });
-      navLabel.textContent = "NAV";
-      const navVal = _el("text", { x: CX, y: CY + 22, "text-anchor": "middle", "font-size": 30, "font-weight": "800", fill: "#ffa028", "pointer-events": "none" });
-      navVal.textContent = formatEok(nav);
+      svg.appendChild(_el("circle", { cx: CX, cy: CY, r: holeR, fill: `url(#pieHoleGlow_${uid})`, opacity: "0.6" }));
+      const ctr = opts.center || { top: "NAV", mid: formatEok(nav) };
+      const navLabel = _el("text", { x: CX, y: CY - (ctr.bottom ? 24 : 10), "text-anchor": "middle", "font-size": ctr.top.length > 6 ? 17 : 20, "font-weight": "700", fill: "#8a877f", "pointer-events": "none" });
+      navLabel.textContent = ctr.top;
+      const navVal = _el("text", { x: CX, y: CY + (ctr.bottom ? 10 : 22), "text-anchor": "middle", "font-size": 30, "font-weight": "800", fill: "#ffa028", "pointer-events": "none" });
+      navVal.textContent = ctr.mid;
       svg.appendChild(navLabel); svg.appendChild(navVal);
+      if (ctr.bottom) {
+        const sub = _el("text", { x: CX, y: CY + 40, "text-anchor": "middle", "font-size": 16, "font-weight": "600", fill: "#8a877f", "pointer-events": "none" });
+        sub.textContent = ctr.bottom;
+        svg.appendChild(sub);
+      }
 
       // 리더라인 라벨: 좌/우로 나눠 세로 겹침 방지
       const sides = { left: [], right: [] };
@@ -1353,14 +2138,17 @@ HTML_TEMPLATE = r"""<!doctype html>
           const sx = CX + R * Math.cos(o.mid), sy = CY + R * Math.sin(o.mid);
           const ex = CX + (R + 26) * Math.cos(o.mid);
           let ey = CY + (R + 26) * Math.sin(o.mid);
-          if (ey - prevY < 24) ey = prevY + 24;        // 겹침 방지
+          if (ey - prevY < lblGap) ey = prevY + lblGap;   // 겹침 방지 (글자 크기에 비례)
           prevY = ey;
           const hx = side === "right" ? ex + 16 : ex - 16;
-          svg.appendChild(_el("polyline", { points: `${sx},${sy} ${ex},${ey} ${hx},${ey}`, class: "pie-leader" }));
-          const t = _el("text", { x: side === "right" ? hx + 4 : hx - 4, y: ey + 4, "text-anchor": side === "right" ? "start" : "end", class: "pie-label-out", "data-key": o.key });
+          svg.appendChild(_el("polyline", { points: `${sx},${sy} ${ex},${ey} ${hx},${ey}`, class: "pie-leader", "stroke-width": Math.max(1, lblFs / 14) }));
+          const t = _el("text", { x: side === "right" ? hx + 4 : hx - 4, y: ey + lblFs * 0.34, "text-anchor": side === "right" ? "start" : "end", class: "pie-label-out", "font-size": lblFs, "data-key": o.key });
           t.textContent = o.label;
           t.style.cursor = "pointer";
-          t.addEventListener("click", () => { state.allocSel = (state.allocSel === o.key) ? null : o.key; renderAlloc(); });
+          t.addEventListener("click", () => {
+            if (opts.onPick) { opts.onPick(o.part); return; }
+            state.allocSel = (state.allocSel === o.key) ? null : o.key; renderAlloc();
+          });
           svg.appendChild(t);
         });
       });
@@ -1383,20 +2171,76 @@ HTML_TEMPLATE = r"""<!doctype html>
         { key: "cash", label: "현금·현금성·증거금", val: cashVal },
       ];
       const total = sum(parts.map((p) => p.val)) || 1;   // 파이 비율 분모 = 그로스+현금
-      drawPieSVG(document.getElementById("allocPie"), parts.filter((p) => p.val > 0), total, nav);
+      const pieEl = document.getElementById("allocPie");
       const legend = document.getElementById("allocLegend"); legend.innerHTML = "";
+
+      if (state.allocDrill === "domestic" || state.allocDrill === "overseas") {
+        drawAllocDrill(state.allocDrill, nav, pieEl, legend);   // 2단계: 개별종목·ETF 구성
+        renderAllocDetail(nav);
+        return;
+      }
+
+      drawPieSVG(pieEl, parts.filter((p) => p.val > 0), total, nav, {});
       parts.filter((p) => p.val).forEach((p) => {
         const item = document.createElement("div"); item.className = "legend-item";
         item.style.cursor = "pointer";
         if (state.allocSel === p.key) item.style.fontWeight = "700";
-        item.addEventListener("click", () => { state.allocSel = (state.allocSel === p.key) ? null : p.key; renderAlloc(); });
+        item.addEventListener("click", () => {
+          const k = p.key;
+          if (state.allocSel === k) { state.allocSel = null; state.allocDrill = null; }
+          else { state.allocSel = k; state.allocDrill = (k === "domestic" || k === "overseas") ? k : null; }
+          renderAlloc();
+        });
         const sw = document.createElement("span"); sw.className = "legend-swatch"; sw.style.background = CHART_COLORS[p.key];
         const lb = document.createElement("span"); lb.className = "legend-label"; lb.textContent = p.label;
         const pc = document.createElement("span"); pc.className = "legend-pct"; pc.textContent = formatPct(p.val / nav);
         const ek = document.createElement("span"); ek.className = "legend-eok"; ek.textContent = formatEok(p.val);
         item.appendChild(sw); item.appendChild(lb); item.appendChild(pc); item.appendChild(ek); legend.appendChild(item);
+        if (p.key === "domestic" || p.key === "overseas") item.title = "클릭 → 개별종목·ETF 구성 보기";
       });
       renderAllocDetail(nav);
+    }
+
+    // ---- 2단계 파이: 국내/해외 주식의 개별종목·ETF 구성 ----
+    function drawAllocDrill(drill, nav, pieEl, legend) {
+      const tab = drill === "domestic" ? "domesticStock" : "overseasStock";
+      const label = drill === "domestic" ? "국내주식" : "해외주식";
+      const rows = activeList(tab).map((r) => ({ r, c: liveStock(r) })).filter((x) => (x.c.value || 0) > 0);
+      const stocks = rows.filter((x) => !x.r.isEtf).sort((a, b) => b.c.value - a.c.value);
+      const etfs = rows.filter((x) => x.r.isEtf).sort((a, b) => b.c.value - a.c.value);
+      const catTotal = sum(rows.map((x) => x.c.value)) || 1;
+      const sVal = sum(stocks.map((x) => x.c.value)), eVal = sum(etfs.map((x) => x.c.value));
+      // 개별종목(앰버) / ETF(블루) 두 조각으로만 구분 — 종목별 상세는 우측 표에서
+      const dparts = [
+        { key: "drillStk", label: `개별종목 (${stocks.length})`, val: sVal, isEtf: false,
+          shade: pieShadeFor(false, 0, 1), text: pieTextFor(false, 0, 1) },
+        { key: "drillEtf", label: `ETF (${etfs.length})`, val: eVal, isEtf: true,
+          shade: pieShadeFor(true, 0, 1), text: pieTextFor(true, 0, 1) },
+      ].filter((p) => p.val > 0);
+      drawPieSVG(pieEl, dparts, catTotal, catTotal, {
+        level2: true,
+        center: { top: label, mid: formatEok(catTotal), bottom: `NAV 대비 ${formatPct(catTotal / nav)}` },
+      });
+
+      const back = document.createElement("button");
+      back.type = "button"; back.className = "pie-back"; back.textContent = "← 전체 자산배분";
+      back.addEventListener("click", () => { state.allocDrill = null; state.allocSel = null; renderAlloc(); });
+      legend.appendChild(back);
+      [{ label: `개별종목 (${stocks.length})`, val: sVal, color: "hsl(33, 92%, 58%)" },
+       { label: `ETF (${etfs.length})`, val: eVal, color: "hsl(205, 45%, 58%)" }]
+        .filter((x) => x.val > 0).forEach((x) => {
+          const item = document.createElement("div"); item.className = "legend-item";
+          const sw = document.createElement("span"); sw.className = "legend-swatch"; sw.style.background = x.color;
+          const lb = document.createElement("span"); lb.className = "legend-label"; lb.textContent = x.label;
+          const pc = document.createElement("span"); pc.className = "legend-pct"; pc.textContent = formatPct(x.val / catTotal);
+          const ek = document.createElement("span"); ek.className = "legend-eok"; ek.textContent = formatEok(x.val);
+          item.appendChild(sw); item.appendChild(lb); item.appendChild(pc); item.appendChild(ek);
+          legend.appendChild(item);
+        });
+      const hint = document.createElement("div");
+      hint.style.cssText = "color:var(--muted);font-size:11.5px;margin-top:8px;line-height:1.5;";
+      hint.textContent = "비율은 " + label + " 내 구성비입니다. 종목별 상세 비중은 우측 표에서 확인하세요.";
+      legend.appendChild(hint);
     }
 
     // ---- 파이 항목 클릭 → 자산군 요약 ----
@@ -1462,6 +2306,12 @@ HTML_TEMPLATE = r"""<!doctype html>
         const totPnl = sum(lives.map((x) => x.c.pnl || 0));
         head.innerHTML = `<span>${cfg.label} (${rows.length})</span><span style="display:inline-flex;align-items:center;gap:8px;">${formatEok(totVal)}${closeBtn}</span>`;
         kv("%NAV", formatPct(totVal / nav));
+        if (!isDeriv) {
+          const etfs = lives.filter((x) => x.r.isEtf), stks = lives.filter((x) => !x.r.isEtf);
+          const eV = sum(etfs.map((x) => x.c.value)), sV = sum(stks.map((x) => x.c.value));
+          kv(`개별종목 (${stks.length}종)`, `${formatEok(sV)} · ${formatPct(totVal ? sV / totVal : 0)}`);
+          kv(`ETF (${etfs.length}종)`, `${formatEok(eV)} · ${formatPct(totVal ? eV / totVal : 0)}`);
+        }
         if (isDeriv) {
           const net = isOpt(tab) ? null : sum(lives.map((x) => dirSign(x.c.direction) * x.c.valueAbs));
           if (net != null) kv("순노출", `${formatEok(net)} · ${formatPct(net / nav)}`);
@@ -1472,12 +2322,16 @@ HTML_TEMPLATE = r"""<!doctype html>
           const putQty = sum(lives.filter((x) => x.r.optCP === "P").map((x) => Math.abs(num(x.r.qty) || 0)));
           kv("콜 / 풋 계약수", `${fmt(callQty, "raw")} / ${fmt(putQty, "raw")}`);
         }
-        kv("평가손익 합", fmt(totPnl, "won0") + "원");
+        // 국내선물은 일일정산(mark-to-market)으로 평가손익이 항상 0 → 손익 열·합계 생략
+        const noPnl = tab === "domesticFutures";
+        if (!noPnl) kv("평가손익 합", fmt(totPnl, "won0") + "원");
+        else kv("평가손익", "일일정산으로 미표시");
         // 전체 목록 (표, 순종목비 내림차순)
         const wrap = document.createElement("div"); wrap.className = "alloc-detail-scroll";
         const tbl = document.createElement("table"); tbl.className = "mini-table";
         const optCols = isOpt(tab) ? "<th>C/P</th><th>계약수</th>" : "";
-        tbl.innerHTML = `<thead><tr><th style="text-align:left;">종목명</th>${isDeriv ? "<th>방향</th>" : ""}${optCols}<th>평가액</th><th>비중</th><th>손익</th></tr></thead>`;
+        const clsCol = !isDeriv ? "<th>구분</th>" : "";
+        tbl.innerHTML = `<thead><tr><th style="text-align:left;">종목명</th>${clsCol}${isDeriv ? "<th>방향</th>" : ""}${optCols}<th>평가액</th><th>비중</th>${noPnl ? "" : "<th>손익</th>"}</tr></thead>`;
         const tb = document.createElement("tbody");
         const sorted = lives.slice().sort((a, b) => (b.c.weight || 0) - (a.c.weight || 0));
         sorted.forEach((x) => {
@@ -1486,10 +2340,13 @@ HTML_TEMPLATE = r"""<!doctype html>
           const pnlCls = pnlV == null ? "" : (pnlV >= 0 ? "ret-pos" : "ret-neg");
           const dirTd = isDeriv ? `<td class="center"><span class="badge ${x.c.direction === "매수" ? "b" : "s"}" style="min-width:auto;height:18px;font-size:11px;">${x.c.direction}</span></td>` : "";
           const optTd = isOpt(tab) ? `<td class="center">${x.r.optCP || ""}</td><td class="number">${fmt(Math.abs(num(x.r.qty) || 0), "raw")}</td>` : "";
-          tr.innerHTML = `<td class="nm" title="${x.r.stockName}">${x.r.stockName}</td>${dirTd}${optTd}`
+          const clsTd = !isDeriv
+            ? `<td class="center"><span class="etf-chip ${x.r.isEtf ? "etf" : "stk"}" title="${x.r.isEtf && x.r.etfL1 ? x.r.etfL1 + (x.r.etfL3 ? " / " + x.r.etfL3 : "") : ""}">${x.r.isEtf ? "ETF" : "개별"}</span></td>`
+            : "";
+          tr.innerHTML = `<td class="nm" title="${x.r.stockName}">${x.r.stockName}</td>${clsTd}${dirTd}${optTd}`
             + `<td class="number">${formatEok(isDeriv ? x.c.valueAbs : x.c.value)}</td>`
             + `<td class="number">${formatPct(x.c.weight)}</td>`
-            + `<td class="number ${pnlCls}">${pnlV == null ? "" : fmt(pnlV, "won0")}</td>`;
+            + (noPnl ? "" : `<td class="number ${pnlCls}">${pnlV == null ? "" : fmt(pnlV, "won0")}</td>`);
           tb.appendChild(tr);
         });
         tbl.appendChild(tb);
@@ -1791,6 +2648,523 @@ HTML_TEMPLATE = r"""<!doctype html>
         `선물 ${futRows.length} · 옵션 ${optRows.length} 기초자산 · ▲ 오르면 이익 / ▼ 내리면 이익`;
     }
 
+    // ---- 기준가 캔들차트 (HTS 관례: 드래그 팬 · 휠 줌 · MA 하이라이트) ----
+    // 기준가는 하루 1개 값이라 OHLC가 없다 → 시가 = 전일 종가 (파이썬에서 합성).
+    // 결산·분배 시 원본 기준가가 1,000원으로 환원되므로 '수정기준가'를 기본으로 쓴다.
+    // 빈도별 기간 프리셋 (단위 = 해당 빈도의 봉 개수)
+    const NAV_RANGES = {
+      D: [["1M", 21], ["3M", 63], ["6M", 126], ["1Y", 252], ["전체", 0]],
+      W: [["1M", 5], ["3M", 13], ["6M", 26], ["1Y", 52], ["전체", 0]],
+      M: [["6M", 6], ["1Y", 12], ["3Y", 36], ["전체", 0]],
+    };
+    const NAV_FREQ = [["일봉", "D"], ["주봉", "W"], ["월봉", "M"]];
+    const NAV_MA = { 10: { c: "#ff2f3f", w: 2.2 }, 20: { c: "#8b96a8", w: 1.1 }, 30: { c: "#59626f", w: 1.1 } };
+    const NAV_UP = "#ff2f3f", NAV_DN = "#2f7fff";
+    const MIN_BARS = 15;
+    const navState = { freq: "D", ma: { 10: true, 20: true, 30: true }, hover: -1, maHover: null };
+    const navView = { i0: 0, n: 0 };            // 표시 시작 인덱스 / 표시 개수
+
+    const navPx = (v) => (v == null ? "-" : v.toLocaleString("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+
+    // ---- 빈도 집계 ----
+    // 일봉: 기준가가 하루 1값이라 시가=전일종가 → 고/저가 몸통과 같아 꼬리가 없다.
+    // 주봉/월봉: 구간 내 최고/최저가 실제로 존재하므로 '진짜 꼬리'가 생긴다.
+    //   시가 = 구간 첫 영업일의 시가(= 구간 직전일 종가) / 종가 = 구간 마지막 영업일 종가
+    function _weekKey(ds) {
+      const d = new Date(ds + "T00:00:00Z");
+      d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));   // 그 주 월요일
+      return d.toISOString().slice(0, 10);
+    }
+    function _sma(vals, n) {
+      const out = []; let acc = 0;
+      for (let i = 0; i < vals.length; i++) {
+        acc += vals[i];
+        if (i >= n) acc -= vals[i - n];
+        out.push(i >= n - 1 ? acc / n : null);
+      }
+      return out;
+    }
+    const _navCache = {};
+    function navBars() {
+      const f = navState.freq;
+      if (_navCache[f]) return _navCache[f];
+      const C = DATA.navChart;
+      let B;
+      if (f === "D") {
+        B = {
+          dates: C.dates, o: C.open, c: C.close,
+          h: C.open.map((o, i) => Math.max(o, C.close[i])),
+          l: C.open.map((o, i) => Math.min(o, C.close[i])),
+          ma: C.ma, settle: C.settleIdx, span: C.dates.map((d) => d),
+        };
+      } else {
+        const keyf = f === "W" ? _weekKey : (ds) => ds.slice(0, 7);
+        const dates = [], o = [], h = [], l = [], c = [], settle = [], span = [];
+        let ck = null;
+        for (let i = 0; i < C.dates.length; i++) {
+          const k = keyf(C.dates[i]);
+          if (k !== ck) {
+            ck = k;
+            dates.push(C.dates[i]); o.push(C.open[i]); c.push(C.close[i]);
+            h.push(Math.max(C.open[i], C.close[i])); l.push(Math.min(C.open[i], C.close[i]));
+            span.push(C.dates[i]);
+          } else {
+            const j = c.length - 1;
+            h[j] = Math.max(h[j], C.close[i]); l[j] = Math.min(l[j], C.close[i]);
+            c[j] = C.close[i]; span[j] = C.dates[i];        // 구간 마지막 영업일
+          }
+          if (C.settleIdx.indexOf(i) >= 0) settle.push(c.length - 1);
+        }
+        B = { dates, o, c, h, l, span, settle, ma: { 10: _sma(c, 10), 20: _sma(c, 20), 30: _sma(c, 30) } };
+      }
+      _navCache[f] = B;
+      return B;
+    }
+    function navTotal() { return DATA.navChart ? navBars().dates.length : 0; }
+    function navClamp() {
+      const t = navTotal();
+      navView.n = Math.min(t, Math.max(Math.min(MIN_BARS, t), navView.n || t));
+      navView.i0 = Math.max(0, Math.min(t - navView.n, navView.i0));
+    }
+    function navRanges() { return NAV_RANGES[navState.freq]; }
+    function navSetRange(bars) {
+      const t = navTotal();
+      navView.n = bars ? Math.min(bars, t) : t;
+      navView.i0 = t - navView.n;
+      navClamp();
+    }
+    function _brighten(hex, amt) {
+      const n = parseInt(hex.slice(1), 16);
+      const r = Math.min(255, ((n >> 16) & 255) + amt), g = Math.min(255, ((n >> 8) & 255) + amt), b = Math.min(255, (n & 255) + amt);
+      return `rgb(${r},${g},${b})`;
+    }
+
+    function renderNavChart() {
+      const C = DATA.navChart;
+      const wrap = document.getElementById("navWrap");
+      if (!C) {
+        document.getElementById("navFundName").textContent = "기준가 이력 없음";
+        document.getElementById("navChartMeta").textContent = "data/black_chart.* 파일을 넣고 다시 실행하세요";
+        ["navLegend", "navFreqBtns", "navRangeBtns", "navMaBtns", "navFoot"].forEach((id) => document.getElementById(id).innerHTML = "");
+        document.getElementById("navPx").textContent = "-";
+        wrap.style.display = "none";
+        return;
+      }
+      wrap.style.display = "";
+      if (!navView.n) navSetRange(126);          // 최초 진입 = 6M(일봉)
+      navClamp();
+      const B = navBars();
+
+      document.getElementById("navFundName").textContent = C.fundName || "기준가";
+      const freqName = (NAV_FREQ.find((f) => f[1] === navState.freq) || [])[0];
+      document.getElementById("navChartMeta").textContent =
+        `${C.priceType} · ${freqName}`
+        + (navState.freq === "D" ? " (시가=전일종가 합성 · 꼬리 없음)" : " (구간 고/저로 꼬리 생성)")
+        + ` · ${C.dates[0]} ~ ${C.dates[C.dates.length - 1]} · ${fmt(C.dates.length, "raw")}영업일 → ${fmt(B.dates.length, "raw")}봉`
+        + (C.settleIdx.length ? ` · 결산 ${C.settleIdx.length}건` : "");
+
+      const last = B.dates.length - 1;
+      const d1 = last > 0 ? B.c[last] / B.c[last - 1] - 1 : 0;
+      document.getElementById("navPx").textContent = navPx(B.c[last]);
+      const chg = document.getElementById("navChg");
+      chg.textContent = `${d1 >= 0 ? "▲" : "▼"} ${Math.abs(B.c[last] - (last > 0 ? B.c[last - 1] : B.c[last])).toFixed(2)}  ${(d1 >= 0 ? "+" : "") + (d1 * 100).toFixed(2)}%`;
+      chg.style.color = d1 >= 0 ? NAV_UP : NAV_DN;
+
+      const fb = document.getElementById("navFreqBtns"); fb.innerHTML = "";
+      NAV_FREQ.forEach(([label, f]) => {
+        const b = document.createElement("button");
+        b.type = "button"; b.textContent = label;
+        b.className = "hts-btn" + (navState.freq === f ? " on" : "");
+        b.addEventListener("click", () => {
+          if (navState.freq === f) return;
+          const prev = navTotal(), frac = navView.n / prev;      // 보던 시간 폭 유지
+          navState.freq = f; navState.hover = -1; navState.maHover = null;
+          const t = navTotal();
+          navView.n = Math.min(t, Math.max(Math.min(MIN_BARS, t), Math.round(t * frac)));
+          navView.i0 = t - navView.n;
+          renderNavChart();
+        });
+        fb.appendChild(b);
+      });
+
+      const rb = document.getElementById("navRangeBtns"); rb.innerHTML = "";
+      navRanges().forEach(([k, bars]) => {
+        const b = document.createElement("button");
+        b.type = "button"; b.textContent = k;
+        const on = (bars ? Math.min(bars, navTotal()) : navTotal()) === navView.n && navView.i0 + navView.n === navTotal();
+        b.className = "hts-btn" + (on ? " on" : "");
+        b.addEventListener("click", () => { navSetRange(bars); navState.hover = -1; renderNavChart(); });
+        rb.appendChild(b);
+      });
+      const mb = document.getElementById("navMaBtns"); mb.innerHTML = "";
+      [10, 20, 30].forEach((p) => {
+        const b = document.createElement("button");
+        b.type = "button"; b.textContent = "MA" + p;
+        b.className = "hts-btn" + (navState.ma[p] ? " on" : "");
+        if (navState.ma[p]) b.style.color = NAV_MA[p].c;
+        b.addEventListener("click", () => { navState.ma[p] = !navState.ma[p]; renderNavChart(); });
+        mb.appendChild(b);
+      });
+
+      renderNavLegend(navState.hover >= 0 ? Math.min(navState.hover, last) : last);
+      document.getElementById("navFoot").textContent =
+        `드래그 = 좌우 이동 · 휠 = 확대/축소 · MA 선에 커서를 올리면 강조 · 표시 ${fmt(navView.n, "raw")}봉 / 전체 ${fmt(navTotal(), "raw")}봉`;
+      drawNavCanvas();
+    }
+
+    function renderNavLegend(i) {
+      const B = navBars(), L = document.getElementById("navLegend");
+      const chip = (label, val, color, on, key) =>
+        `<span class="hts-chip${on ? " on" : ""}" data-ma="${key || ""}">`
+        + (color ? `<span class="dot" style="background:${color}"></span>` : "")
+        + `${label} <b>${val}</b></span>`;
+      const label = navState.freq === "D" ? B.dates[i]
+        : `${B.dates[i]} ~ ${B.span[i]}`;
+      const parts = [`<span class="hts-chip">${label}</span>`, chip("시", navPx(B.o[i]), null, false)];
+      if (navState.freq !== "D") {          // 주/월봉만 고·저가 의미 있음
+        parts.push(chip("고", navPx(B.h[i]), null, false));
+        parts.push(chip("저", navPx(B.l[i]), null, false));
+      }
+      parts.push(chip("종", navPx(B.c[i]), null, false));
+      [10, 20, 30].forEach((p) => {
+        if (!navState.ma[p]) return;
+        parts.push(chip("MA" + p, navPx(B.ma[String(p)][i]), NAV_MA[p].c, navState.maHover === p, p));
+      });
+      L.innerHTML = parts.join("");
+    }
+
+    function drawNavCanvas() {
+      const C = DATA.navChart;
+      const cv = document.getElementById("navCanvas");
+      if (!C || !cv || !cv.parentElement || !cv.parentElement.clientWidth) return;
+      navClamp();
+      const dpr = window.devicePixelRatio || 1;
+      const W = cv.parentElement.clientWidth;
+      const H = Math.max(360, Math.min(560, Math.round(W * 0.42)));
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+      cv.style.height = H + "px";
+      const ctx = cv.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = "#0e1420"; ctx.fillRect(0, 0, W, H);
+
+      const B = navBars();
+      const i0 = navView.i0, n = navView.n, i1 = i0 + n;
+      const PAD = { t: 12, r: 64, b: 22, l: 10 };
+      const cw = W - PAD.l - PAD.r, ch = H - PAD.t - PAD.b;
+      let lo = Infinity, hi = -Infinity;
+      for (let i = i0; i < i1; i++) { lo = Math.min(lo, B.l[i]); hi = Math.max(hi, B.h[i]); }
+      [10, 20, 30].forEach((p) => {
+        if (!navState.ma[p]) return;
+        for (let i = i0; i < i1; i++) { const v = B.ma[String(p)][i]; if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }
+      });
+      const mgn = (hi - lo) * 0.08 || 1; lo -= mgn; hi += mgn;
+      const X = (i) => PAD.l + (i - i0 + 0.5) * (cw / n);
+      const Y = (v) => PAD.t + (hi - v) / (hi - lo) * ch;
+
+      ctx.font = '10.5px ui-monospace, Menlo, monospace';
+      ctx.textBaseline = "middle"; ctx.textAlign = "left";
+      for (let k = 0; k <= 5; k++) {
+        const v = lo + (hi - lo) * k / 5, y = Math.round(Y(v)) + 0.5;
+        ctx.strokeStyle = "#1b2433"; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(PAD.l + cw, y); ctx.stroke();
+        ctx.fillStyle = "#7d8798"; ctx.fillText(navPx(v), PAD.l + cw + 8, y);
+      }
+      ctx.textAlign = "center"; ctx.textBaseline = "top";
+      let lastM = "", lastLabelX = -1e9;
+      const unit = navState.freq === "M" ? 4 : 7;     // 월봉은 연-월 대신 연도 단위로 묶어 라벨
+      for (let i = i0; i < i1; i++) {
+        const m = B.dates[i].slice(0, unit);
+        if (m === lastM) continue;
+        lastM = m;
+        if (X(i) - lastLabelX < 54) continue;         // 라벨 최소 간격
+        lastLabelX = X(i);
+        if (i > i0) { ctx.strokeStyle = "#161d29"; ctx.beginPath(); ctx.moveTo(X(i), PAD.t); ctx.lineTo(X(i), PAD.t + ch); ctx.stroke(); }
+        ctx.fillStyle = "#7d8798"; ctx.fillText(navState.freq === "M" ? m : m.slice(2), X(i), PAD.t + ch + 5);
+      }
+      B.settle.forEach((i) => {              // 결산일
+        if (i < i0 || i >= i1) return;
+        ctx.strokeStyle = "#ffd45e"; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(X(i), PAD.t); ctx.lineTo(X(i), PAD.t + ch); ctx.stroke();
+        ctx.setLineDash([]);
+      });
+
+      const bw = Math.max(1, Math.min(13, (cw / n) * 0.66));
+      for (let i = i0; i < i1; i++) {        // 캔들 (상승=적 / 하락=청)
+        const o = B.o[i], c = B.c[i], col = c >= o ? NAV_UP : NAV_DN;
+        const x = X(i);
+        if (B.h[i] > Math.max(o, c) || B.l[i] < Math.min(o, c)) {   // 꼬리 (주봉·월봉에만 생김)
+          ctx.strokeStyle = col; ctx.lineWidth = Math.max(1, Math.min(2, bw * 0.16));
+          ctx.beginPath(); ctx.moveTo(x, Y(B.h[i])); ctx.lineTo(x, Y(B.l[i])); ctx.stroke();
+        }
+        ctx.fillStyle = col;
+        const y0 = Y(Math.max(o, c)), y1 = Y(Math.min(o, c));
+        ctx.fillRect(x - bw / 2, y0, bw, Math.max(1, y1 - y0));
+      }
+
+      // MA: 역순(30→10)으로 그려 MA10 이 최상단. hover 된 선은 밝게·굵게·글로우, 나머지는 흐리게.
+      const order = [30, 20, 10].filter((p) => navState.ma[p]);
+      if (navState.maHover) { order.sort((a, b) => (a === navState.maHover ? 1 : 0) - (b === navState.maHover ? 1 : 0)); }
+      order.forEach((p) => {
+        const arr = B.ma[String(p)], on = navState.maHover === p;
+        ctx.save();
+        if (navState.maHover && !on) ctx.globalAlpha = 0.28;
+        ctx.strokeStyle = on ? _brighten(NAV_MA[p].c, 70) : NAV_MA[p].c;
+        ctx.lineWidth = NAV_MA[p].w + (on ? 1.4 : 0);
+        if (on) { ctx.shadowColor = NAV_MA[p].c; ctx.shadowBlur = 8; }
+        ctx.lineJoin = "round"; ctx.beginPath();
+        let started = false;
+        for (let i = i0; i < i1; i++) {
+          const v = arr[i]; if (v == null) continue;
+          if (!started) { ctx.moveTo(X(i), Y(v)); started = true; } else ctx.lineTo(X(i), Y(v));
+        }
+        ctx.stroke(); ctx.restore();
+      });
+
+      if (navState.hover >= i0 && navState.hover < i1) {     // 크로스헤어
+        ctx.strokeStyle = "#5b6b85"; ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(X(navState.hover), PAD.t); ctx.lineTo(X(navState.hover), PAD.t + ch); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      cv._geo = { i0, n, PAD, cw, ch, X, Y, lo, hi };
+    }
+
+    function initNavChart() {
+      const cv = document.getElementById("navCanvas");
+      const tip = document.getElementById("navTip");
+      if (!cv) return;
+      let drag = null;
+
+      const idxAt = (mx) => {
+        const g = cv._geo;
+        return g.i0 + (mx - g.PAD.l) / (g.cw / g.n) - 0.5;      // 실수 인덱스
+      };
+      // MA 히트 판정: 인접 두 점을 선형보간해 실제 폴리라인과의 거리로 판정 (인덱스 스냅 아님)
+      const maHit = (mx, my) => {
+        const B = navBars(), g = cv._geo;
+        const fi = idxAt(mx), i = Math.floor(fi), t = fi - i;
+        let best = null, bestD = 6;
+        for (const p of [10, 20, 30]) {
+          if (!navState.ma[p]) continue;
+          const a = B.ma[String(p)][i], b = B.ma[String(p)][i + 1];
+          if (a == null || b == null) continue;
+          const d = Math.abs(g.Y(a + (b - a) * t) - my);
+          if (d < bestD) { bestD = d; best = p; }
+        }
+        return best;
+      };
+
+      cv.addEventListener("mousedown", (ev) => {
+        drag = { x: ev.clientX, i0: navView.i0 };
+        cv.style.cursor = "grabbing";
+        ev.preventDefault();
+      });
+      window.addEventListener("mouseup", () => {
+        if (!drag) return;
+        drag = null; cv.style.cursor = "crosshair";
+        document.getElementById("navFoot").textContent =
+          `드래그 = 좌우 이동 · 휠 = 확대/축소 · MA 선에 커서를 올리면 강조 · 표시 ${fmt(navView.n, "raw")}봉 / 전체 ${fmt(navTotal(), "raw")}봉`;
+      });
+      cv.addEventListener("mousemove", (ev) => {
+        const C = DATA.navChart; if (!C || !cv._geo) return;
+        const g = cv._geo, rect = cv.getBoundingClientRect();
+        const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+
+        if (drag) {                                   // 드래그 팬
+          const shift = Math.round((ev.clientX - drag.x) / (g.cw / g.n));
+          navView.i0 = Math.max(0, Math.min(navTotal() - navView.n, drag.i0 - shift));
+          drawNavCanvas();
+          tip.style.display = "none";
+          return;
+        }
+        let i = Math.round(idxAt(mx));
+        i = Math.max(g.i0, Math.min(g.i0 + g.n - 1, i));
+        const mh = maHit(mx, my);
+        if (i !== navState.hover || mh !== navState.maHover) {
+          navState.hover = i; navState.maHover = mh;
+          drawNavCanvas(); renderNavLegend(i);
+        }
+        cv.style.cursor = mh ? "pointer" : "crosshair";
+
+        const B = navBars();
+        const o = B.o[i], c = B.c[i], r = o ? c / o - 1 : 0;
+        const row = (k, v, hi, col) =>
+          `<div class="row${hi ? " hi" : ""}"><span class="k"${col ? ` style="color:${col}"` : ""}>${k}</span><span class="v">${v}</span></div>`;
+        const head = navState.freq === "D" ? B.dates[i] : `${B.dates[i]} ~ ${B.span[i]}`;
+        tip.innerHTML = `<div class="d">${head}${B.settle.indexOf(i) >= 0 ? " · 결산" : ""}</div>`
+          + row("시가", navPx(o))
+          + (navState.freq !== "D" ? row("고가", navPx(B.h[i])) + row("저가", navPx(B.l[i])) : "")
+          + row("종가", navPx(c))
+          + `<div class="row"><span class="k">등락</span><span class="v" style="color:${r >= 0 ? NAV_UP : NAV_DN}">${(r >= 0 ? "+" : "") + (r * 100).toFixed(2)}%</span></div>`
+          + [10, 20, 30].filter((p) => navState.ma[p] && B.ma[String(p)][i] != null)
+              .map((p) => row("MA" + p, navPx(B.ma[String(p)][i]), navState.maHover === p, NAV_MA[p].c)).join("");
+        tip.style.display = "block";
+        let tx = g.X(i) + 14;
+        if (tx + tip.offsetWidth > cv.clientWidth) tx = g.X(i) - tip.offsetWidth - 14;
+        tip.style.left = Math.max(2, tx) + "px";
+        tip.style.top = Math.max(4, Math.min(cv.clientHeight - tip.offsetHeight - 4, my - tip.offsetHeight / 2)) + "px";
+      });
+      cv.addEventListener("mouseleave", () => {
+        if (drag) return;
+        navState.hover = -1; navState.maHover = null;
+        tip.style.display = "none";
+        drawNavCanvas();
+        if (DATA.navChart) renderNavLegend(navBars().dates.length - 1);
+      });
+      cv.addEventListener("wheel", (ev) => {           // 휠 줌 (커서 위치 고정)
+        if (!DATA.navChart || !cv._geo) return;
+        ev.preventDefault();
+        const t = navTotal(), rect = cv.getBoundingClientRect();
+        const anchor = idxAt(ev.clientX - rect.left);
+        const ratio = (anchor - navView.i0) / navView.n;
+        let n = Math.round(navView.n * (ev.deltaY > 0 ? 1.25 : 0.8));
+        n = Math.min(t, Math.max(Math.min(MIN_BARS, t), n));
+        navView.n = n;
+        navView.i0 = Math.max(0, Math.min(t - n, Math.round(anchor - ratio * n)));
+        drawNavCanvas();
+        document.getElementById("navFoot").textContent =
+          `드래그 = 좌우 이동 · 휠 = 확대/축소 · MA 선에 커서를 올리면 강조 · 표시 ${fmt(navView.n, "raw")}봉 / 전체 ${fmt(t, "raw")}봉`;
+      }, { passive: false });
+      window.addEventListener("resize", () => { if (state.view === "navchart") drawNavCanvas(); });
+    }
+
+    // ---- 섹터 비중 (주식 보유분 기준, ETF 는 업종명이 없어 'ETF' 로 묶임) ----
+    const SECTOR_SCOPES = [["전체", "all"], ["국내", "domesticStock"], ["해외", "overseasStock"]];
+    const sectorState = { scope: "all", sel: null, withEtf: false };
+    // 업종이 많아 앰버 단일 계열로는 구분이 어려움 → 다크 배경에서 읽히는 카테고리 팔레트
+    const SECTOR_PALETTE = [
+      ["#ffb347", "#e07d00"], ["#ff8a5b", "#d4551f"], ["#ff6b6b", "#c73e3e"], ["#e884b8", "#b04d84"],
+      ["#b18ce0", "#7d55b0"], ["#7f9fe8", "#4a68b0"], ["#5bb8d4", "#2d7f9c"], ["#5fc9a3", "#2d8f6b"],
+      ["#a3c95f", "#6b8f2d"], ["#d4c95b", "#9c8f2d"], ["#c9a37f", "#8f6b4a"], ["#9aa5b1", "#5f6b78"],
+    ];
+    const SECTOR_ETF = ["#7fb3d5", "#4a7a9b"], SECTOR_NA = ["#4a4a4a", "#2f2f2f"];
+
+    function sectorRows() {
+      const k = sectorState.scope;
+      const src = k === "all" ? activeList("domesticStock").concat(activeList("overseasStock")) : activeList(k);
+      const all = src.map((r) => ({ r, c: liveStock(r) })).filter((x) => (x.c.value || 0) > 0);
+      // ETF 는 업종이 부여되지 않아 한 덩어리(60%+)로 잡혀 업종 그림을 가린다.
+      // 기본은 ETF 를 빼고 '보유 업종 내 비중'만 본다. (토글로 포함 가능)
+      const lives = sectorState.withEtf ? all : all.filter((x) => !x.r.isEtf);
+      const etfVal = sum(all.filter((x) => x.r.isEtf).map((x) => x.c.value));
+      const agg = {};
+      lives.forEach((x) => {
+        const s = x.r.sector || "미분류";
+        (agg[s] = agg[s] || { sector: s, val: 0, items: [] });
+        agg[s].val += x.c.value;
+        agg[s].items.push(x);
+      });
+      const rows = Object.values(agg).sort((a, b) => b.val - a.val);
+      let pi = 0;
+      rows.forEach((x) => {
+        x.shade = x.sector === "ETF" ? SECTOR_ETF : x.sector === "미분류" ? SECTOR_NA : SECTOR_PALETTE[pi++ % SECTOR_PALETTE.length];
+      });
+      return { rows, total: sum(lives.map((x) => x.c.value)) || 1, etfVal, allVal: sum(all.map((x) => x.c.value)) || 1 };
+    }
+
+    function renderSector() {
+      const sb = document.getElementById("sectorScope"); sb.innerHTML = "";
+      SECTOR_SCOPES.forEach(([label, k]) => {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "menu-btn" + (sectorState.scope === k ? " active" : "");
+        b.style.cssText = "height:24px;padding:0 12px;font-size:11.5px;border-radius:4px;";
+        b.textContent = label;
+        b.addEventListener("click", () => { sectorState.scope = k; sectorState.sel = null; renderSector(); });
+        sb.appendChild(b);
+      });
+      const tg = document.createElement("button");
+      tg.type = "button"; tg.className = "menu-btn" + (sectorState.withEtf ? " active" : "");
+      tg.style.cssText = "height:24px;padding:0 12px;font-size:11.5px;border-radius:4px;margin-left:8px;";
+      tg.textContent = "ETF 포함";
+      tg.title = "ETF는 업종이 부여되지 않아 기본은 제외합니다";
+      tg.addEventListener("click", () => { sectorState.withEtf = !sectorState.withEtf; sectorState.sel = null; renderSector(); });
+      sb.appendChild(tg);
+
+      const { rows, total, etfVal, allVal } = sectorRows();
+      const nav = DATA.nav || 1;
+      document.getElementById("sectorHint").textContent =
+        `· ${sectorState.withEtf ? "주식 보유분 전체" : "개별종목"} ${formatEok(total)} 기준 · ${rows.length}개 업종`
+        + (sectorState.withEtf ? "" : (etfVal ? ` · ETF ${formatEok(etfVal)} (주식의 ${formatPct(etfVal / allVal)})은 업종 미부여로 제외` : ""));
+
+      const parts = rows.map((x, i) => ({
+        key: "sec" + i, label: x.sector, val: x.val,
+        shade: x.shade, text: "#0a0a0a", sector: x.sector,
+      }));
+      const pie = document.getElementById("sectorPie");
+      if (!parts.length) { pie.innerHTML = ""; document.getElementById("sectorLegend").innerHTML = '<div class="muted center" style="padding:20px;">주식 보유분 없음</div>'; renderSectorDetail(); return; }
+      drawPieSVG(pie, parts, total, total, {
+        onPick: (p) => { sectorState.sel = (sectorState.sel === p.sector) ? null : p.sector; renderSector(); },
+        selKey: rows.findIndex((x) => x.sector === sectorState.sel) >= 0 ? "sec" + rows.findIndex((x) => x.sector === sectorState.sel) : null,
+        center: { top: sectorState.withEtf ? "주식 보유분" : "개별종목", mid: formatEok(total), bottom: `NAV 대비 ${formatPct(total / nav)}` },
+      });
+
+      const lg = document.getElementById("sectorLegend"); lg.innerHTML = "";
+      rows.forEach((x) => {
+        const item = document.createElement("div"); item.className = "legend-item";
+        item.style.cursor = "pointer";
+        if (sectorState.sel === x.sector) item.style.fontWeight = "700";
+        item.addEventListener("click", () => { sectorState.sel = (sectorState.sel === x.sector) ? null : x.sector; renderSector(); });
+        const sw = document.createElement("span"); sw.className = "legend-swatch"; sw.style.background = x.shade[0];
+        const lb = document.createElement("span"); lb.className = "legend-label";
+        lb.textContent = x.sector + (x.items.length > 1 ? ` (${x.items.length})` : "");
+        const pc = document.createElement("span"); pc.className = "legend-pct"; pc.textContent = formatPct(x.val / total);
+        const ek = document.createElement("span"); ek.className = "legend-eok"; ek.textContent = formatEok(x.val);
+        item.appendChild(sw); item.appendChild(lb); item.appendChild(pc); item.appendChild(ek);
+        lg.appendChild(item);
+      });
+      renderSectorDetail();
+    }
+
+    function renderSectorDetail() {
+      const box = document.getElementById("sectorDetail");
+      box.innerHTML = "";
+      const { rows, total } = sectorRows();
+      const nav = DATA.nav || 1;
+      if (!sectorState.sel) {
+        const d = document.createElement("div");
+        d.className = "center muted"; d.style.padding = "28px 12px"; d.style.fontSize = "13px";
+        d.textContent = "다이어그램이나 범례에서 업종을 선택하면 구성 종목이 표시됩니다.";
+        box.appendChild(d);
+        return;
+      }
+      const x = rows.find((r) => r.sector === sectorState.sel);
+      if (!x) { sectorState.sel = null; return renderSectorDetail(); }
+
+      const head = document.createElement("div"); head.className = "alloc-detail-head";
+      head.innerHTML = `<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${x.shade[0]};margin-right:7px;"></span>${x.sector}</span>`
+        + `<span style="display:inline-flex;align-items:center;gap:8px;">${formatEok(x.val)}`
+        + `<button type="button" class="mini-x" title="닫기">✕</button></span>`;
+      head.querySelector(".mini-x").addEventListener("click", () => { sectorState.sel = null; renderSector(); });
+      box.appendChild(head);
+
+      const kv = (k, v) => {
+        const d = document.createElement("div"); d.className = "alloc-detail-row";
+        d.innerHTML = `<span class="k">${k}</span><span class="v">${v}</span>`;
+        box.appendChild(d);
+      };
+      kv(sectorState.withEtf ? "주식 내 비중" : "개별종목 내 비중", formatPct(x.val / total));
+      kv("NAV 대비", formatPct(x.val / nav));
+      kv("종목 수", `${fmt(x.items.length, "raw")}종`);
+      const pnl = sum(x.items.map((i) => i.c.pnl || 0));
+      kv("평가손익 합", fmt(pnl, "won0") + "원");
+
+      const wrap = document.createElement("div"); wrap.className = "alloc-detail-scroll";
+      const tbl = document.createElement("table"); tbl.className = "mini-table";
+      tbl.innerHTML = '<thead><tr><th style="text-align:left;">종목명</th><th>구분</th><th>평가액</th><th>비중</th><th>수익률</th><th>손익</th></tr></thead>';
+      const tb = document.createElement("tbody");
+      x.items.slice().sort((a, b) => b.c.value - a.c.value).forEach((it) => {
+        const tr = document.createElement("tr");
+        const rp = it.c.returnPct, pv = it.c.pnl;
+        tr.innerHTML = `<td class="nm" title="${it.r.stockName}">${it.r.stockName}</td>`
+          + `<td class="center"><span class="etf-chip ${it.r.isEtf ? "etf" : "stk"}">${it.r.isEtf ? "ETF" : "개별"}</span></td>`
+          + `<td class="number">${formatEok(it.c.value)}</td>`
+          + `<td class="number">${formatPct(it.c.weight)}</td>`
+          + `<td class="number ${rp == null ? "" : rp >= 0 ? "ret-pos" : "ret-neg"}">${rp == null ? "" : (rp >= 0 ? "+" : "") + rp.toFixed(2) + "%"}</td>`
+          + `<td class="number ${pv == null ? "" : pv >= 0 ? "ret-pos" : "ret-neg"}">${pv == null ? "" : fmt(pv, "won0")}</td>`;
+        tb.appendChild(tr);
+      });
+      tbl.appendChild(tb); wrap.appendChild(tbl); box.appendChild(wrap);
+    }
+
     // ---- 손익: 누적수익률 상/하위 Top 10 ----
     function renderPnl() {
       const rows = activeList("domesticStock").concat(activeList("overseasStock"))
@@ -1932,28 +3306,41 @@ def write_html(data, output_path):
     output_path.write_text(html, encoding="utf-8")
 
 
+SCRIPT_VERSION = "2026-07-16"
+
+
 def main():
+    print(f"[black_on] v{SCRIPT_VERSION}")
     # 경로: 이 스크립트는 igis/dashboard/generate_black_on_dashboard.py 에 위치
     base_dir = Path(__file__).resolve().parent          # igis/dashboard
+    data_dir = base_dir / "data" if (base_dir / "data").is_dir() else base_dir
 
-    # 입력 워크북 결정: 인자가 있으면 그 파일, 없으면 최신 워크북 자동 선택
+    # 입력 워크북 결정: 인자가 있으면 그 파일, 없으면 data/ 폴더의 최신 워크북 자동 선택
     if len(sys.argv) > 1 and not sys.argv[1].startswith("--"):
         workbook_path = Path(sys.argv[1])
         if not workbook_path.is_absolute():
-            workbook_path = base_dir / workbook_path
+            for cand in (data_dir / workbook_path, base_dir / workbook_path):
+                if cand.exists():
+                    workbook_path = cand
+                    break
+            else:
+                workbook_path = data_dir / workbook_path
     else:
-        candidates = sorted(
-            list(base_dir.glob("black_on_*.xlsx")) + list(base_dir.glob("블랙ON_*.xlsx"))
-            + list(base_dir.glob("체결화면*.xlsx")),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
+        pats = ("black_on_*.xlsx", "블랙ON_*.xlsx", "체결화면*.xlsx")
+        search_dirs = [data_dir] if data_dir != base_dir else [base_dir]
+        if data_dir != base_dir:
+            search_dirs.append(base_dir)              # 하위호환: 예전 위치도 탐색
+        candidates = []
+        for d in search_dirs:
+            for pat in pats:
+                candidates += list(d.glob(pat))
         candidates = [p for p in candidates if not p.name.startswith("~$")]
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         if not candidates:
-            print("black_on_*.xlsx / 블랙ON_*.xlsx / 체결화면*.xlsx 파일을 찾을 수 없습니다. (dashboard 폴더에 워크북을 두거나 파일명을 인자로 주세요)")
+            print(f"워크북(black_on_*/블랙ON_*/체결화면*.xlsx)을 찾을 수 없습니다. data 폴더: {data_dir}")
             sys.exit(1)
         workbook_path = candidates[0]
-        print(f"[자동 선택] {workbook_path.name}")
+        print(f"[자동 선택] {workbook_path.relative_to(base_dir) if base_dir in workbook_path.parents or workbook_path.parent == base_dir else workbook_path.name}")
 
     if not workbook_path.exists():
         print(f"워크북을 찾을 수 없습니다: {workbook_path}")
