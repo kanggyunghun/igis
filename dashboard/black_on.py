@@ -103,6 +103,9 @@ def classify_row(group, kind):
 
 _OPT_NAME = re.compile(r"(\d{4})-(\d{2})\s*(콜|풋)\s*(\d+(?:\.\d+)?)")
 _STOCKFUT_NAME = re.compile(r"^(.*?)\s+F\s+\d{6}")
+_STOCKFUT_DATE_PRE = re.compile(r"^\s*\d{4}[-.]?\d{2}\s+")       # '2026-08 ' 접두
+_STOCKFUT_DATE_SUF = re.compile(r"\s*\d{4}[-.]?\d{2}\s*$")       # ' 2026-08' 접미
+_STOCKFUT_SUF = re.compile(r"(개별선물|주식선물|선물)\s*$")           # '…개별선물' 접미
 
 
 _OVS_OPT_CODE = re.compile(r"^[A-Z][A-Z0-9 ]*?[FGHJKMNQUVXZ]\d(C|P)\d+(?:\.\d+)?$")
@@ -141,8 +144,16 @@ def parse_stock_future_underlying(name):
 
     '삼성전자   F 202607 (  10)' → '삼성전자'. 파싱 실패 시 None (미매칭 표시).
     """
-    m = _STOCKFUT_NAME.match(name or "")
-    return m.group(1).strip() if m else None
+    name = (name or "").strip()
+    m = _STOCKFUT_NAME.match(name)                    # ① '삼성전자 F 202607' 형식
+    if m:
+        cand = m.group(1).strip()
+    else:                                             # ② '2026-08 삼성전자개별선물' 형식
+        s2 = _STOCKFUT_DATE_PRE.sub("", name)
+        s2 = _STOCKFUT_DATE_SUF.sub("", s2)
+        s2 = _STOCKFUT_SUF.sub("", s2).strip()
+        cand = s2
+    return cand or None
 
 
 def parse_option_name(name):
@@ -238,7 +249,7 @@ def read_sheet1(ws, cash_etf_codes=None, etf_univ=None, sector_map=None):
                 opt_expiry, opt_cp, opt_strike = parse_option_name(name)
             else:                                # 해외옵션: 'Crude Oil C90.0'
                 opt_under, opt_cp, opt_strike = parse_overseas_option(_code_raw, name)
-        fut_under = parse_stock_future_underlying(name) if kind == "개별주식선물" else None
+        fut_under = (parse_stock_future_underlying(name) or name) if kind == "개별주식선물" else None
 
         cats[cat].append({
             "no": clean_number(_cell(ws, r, "no")),
@@ -678,7 +689,9 @@ _NAV_COL_GROUPS = {
     "code": ("펀드코드",),
     "annual": ("연환산",),          # 연환산수익률 (원천 제공)
     "w1": ("1주",),                 # 1주실현수익률 (원천 제공)
-    "m1": ("1개월",),               # 1개월실현수익률 (원천 제공, '12개월'과 안 겹침)
+    "m1": ("1개월",),
+    "m3": ("3개월",),
+    "ytd": ("년초대비", "연초대비", "YTD"),
     "total": ("총수익률",),
 }
 
@@ -810,6 +823,8 @@ def load_nav_history(workbook_path, target_code=None, target_name=None, include_
     ci_ann = col(*_NAV_COL_GROUPS["annual"])
     ci_w1 = col(*_NAV_COL_GROUPS["w1"])
     ci_m1 = col(*_NAV_COL_GROUPS["m1"])
+    ci_m3 = col(*_NAV_COL_GROUPS["m3"])
+    ci_ytd = col(*_NAV_COL_GROUPS["ytd"])
     ci_tot = col(*_NAV_COL_GROUPS["total"])
     if ci_date is None or (ci_adj is None and ci_raw is None):
         print(f"[경고] {path.name} 에 처리일자/기준가 컬럼을 찾지 못함")
@@ -838,6 +853,8 @@ def load_nav_history(workbook_path, target_code=None, target_name=None, include_
             "annual": clean_number(g(row, ci_ann)),
             "w1": clean_number(g(row, ci_w1)),
             "m1": clean_number(g(row, ci_m1)),
+            "m3": clean_number(g(row, ci_m3)),
+            "ytd": clean_number(g(row, ci_ytd)),
             "total": clean_number(g(row, ci_tot)),
         }))
     if not staged:
@@ -913,11 +930,14 @@ def load_nav_history(workbook_path, target_code=None, target_name=None, include_
     metrics = {
         "annual": last_src.get("annual"),        # 원천 제공 (설정 이후 연환산)
         "mdd": round(mdd * 100, 2),              # 계산 (설정 이후 전 구간, 수정기준가 기준)
-        "w1": _ret_back(7),                      # 계산 (달력 7일, 원수익률)
-        "m1": _ret_back(30),                     # 계산 (달력 30일, 원수익률)
+        "w1": _ret_back(7),
+        "m1": _ret_back(30),
+        "m3": _ret_back(91),
+        "ytd": last_src.get("ytd"),
         "total": last_src.get("total") if last_src.get("total") is not None else round((closes[-1] / 1000 - 1) * 100, 2),
-        "w1Ann": last_src.get("w1"),             # 원천 연환산값 (툴팁용)
+        "w1Ann": last_src.get("w1"),
         "m1Ann": last_src.get("m1"),
+        "m3Ann": last_src.get("m3"),
     }
     print(f"[안내] 기준가 이력 {len(dates)}영업일 로드 ({dates[0]} ~ {dates[-1]}"
           + (f", 결산 {len(settle_idx)}건" if settle_idx else "") + f") — {path.name}")
@@ -1318,7 +1338,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     .nav-tip .row .k { color: #7d8798; }
     .nav-tip .row .v { font-weight: 600; }
     .nav-empty { padding: 40px; text-align: center; color: var(--hmute); }
-    .summary { display: grid; grid-template-columns: repeat(5, minmax(140px, 1fr)); gap: 10px; }
+    .summary { display: grid; grid-template-columns: repeat(6, minmax(128px, 1fr)); gap: 10px; }
     .metric, .panel { background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); }
     .metric { padding: 13px 14px; min-height: 84px; border-color: var(--line-strong); }
     .metric .label { color: var(--amber); font-size: 13px; font-weight: 700; letter-spacing: .02em; margin-bottom: 7px; }
@@ -1364,6 +1384,11 @@ HTML_TEMPLATE = r"""<!doctype html>
     .opt-pill.up { color: var(--ok); background: var(--soft-ok); }
     .opt-pill.down { color: var(--bad); background: var(--soft-bad); }
     .opt-pill.flat { color: var(--muted); background: #eef1f5; }
+    .verdict-long, .verdict-short, .verdict-hedge { font-weight: 700; font-size: 12.5px; letter-spacing: .01em; }
+    .verdict-long { color: #ff6b6b; }      /* 롱 = 적(상승 이익) */
+    .verdict-short { color: #4a90d9; }     /* 숏 = 청(하락 이익) */
+    .verdict-hedge { color: #b8a888; }     /* 헷지 = 중립 골드그레이 */
+    .verdict-prem { color: #d4a94a; }      /* 프리미엄 수취 = 앰버 (인컴 성격) */
     .etf-chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 700; }
     .etf-chip.etf { color: #9ecbe8; background: #14293a; }
     .etf-chip.stk { color: #ffc46b; background: #33260f; }
@@ -1371,7 +1396,12 @@ HTML_TEMPLATE = r"""<!doctype html>
     .deriv-line + .deriv-line { margin-top: 2px; padding-top: 2px; border-top: 1px dashed var(--line); }
     tfoot td { position: sticky; bottom: 0; background: #000; font-weight: 700; color: var(--amber); border-top: 2px solid var(--amber); }
     .delete-row { width: 30px; padding: 0; }
-    .grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr); gap: 14px; align-items: start; }
+    .grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr); gap: 14px; align-items: stretch; }
+    .grid-2 > .panel { min-width: 0; display: flex; flex-direction: column; }
+    .grid-2 > .panel > .panel-body { flex: 1; min-height: 0; }
+    /* 손익 탭: 좌우 동일 폭(대칭) */
+    .grid-even { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+    .grid-even > .panel { min-width: 0; }
     .sec-row { display: grid; grid-template-columns: minmax(120px, 170px) minmax(0, 1fr) 62px 78px; gap: 10px;
       align-items: center; padding: 4px 2px; border-radius: 4px; }
     .sec-row:hover { background: var(--panel-2); }
@@ -1391,7 +1421,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     .alloc-detail-row .k { color: var(--muted); }
     .alloc-detail-row .v { font-variant-numeric: tabular-nums; font-weight: 600; }
     .alloc-detail-list { border-top: 1px dashed var(--line); margin-top: 4px; padding-top: 6px; display: grid; gap: 4px; }
-    .alloc-detail-scroll { max-height: 420px; overflow-y: auto; margin-top: 6px; border: 1px solid var(--line); border-radius: 6px; }
+    .alloc-detail-scroll { max-height: 340px; overflow-y: auto; margin-top: 6px; border: 1px solid var(--line); border-radius: 6px; }
     .mini-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12.5px; }
     .mini-table th { position: sticky; top: 0; background: #000; color: var(--amber); font-weight: 700; padding: 7px 10px; text-align: right; font-size: 12px; z-index: 2; }
     .mini-table th:first-child { text-align: left; }
@@ -1460,10 +1490,11 @@ HTML_TEMPLATE = r"""<!doctype html>
     </div>
     <section class="summary view" id="viewSummary" aria-label="요약">
       <div class="metric"><div class="label">연환산 수익률</div><div class="value" id="mAnnual">-</div><div class="sub" id="mAnnualSub"></div></div>
-      <div class="metric"><div class="label">MDD</div><div class="value" id="mMdd">-</div><div class="sub" id="mMddSub"></div></div>
       <div class="metric"><div class="label">1주 수익률</div><div class="value" id="mW1">-</div><div class="sub" id="mW1Sub"></div></div>
       <div class="metric"><div class="label">1달 수익률</div><div class="value" id="mM1">-</div><div class="sub" id="mM1Sub"></div></div>
-      <div class="metric" id="mPnlBox"><div class="label">총 평가손익</div><div class="value" id="mPnl">-</div><div class="sub" id="mPnlSub"></div></div>
+      <div class="metric"><div class="label">3달 수익률</div><div class="value" id="mM3">-</div><div class="sub" id="mM3Sub"></div></div>
+      <div class="metric"><div class="label">YTD</div><div class="value" id="mYtd">-</div><div class="sub" id="mYtdSub"></div></div>
+      <div class="metric"><div class="label">MDD</div><div class="value" id="mMdd">-</div><div class="sub" id="mMddSub"></div></div>
     </section>
 
     <section class="view view-hidden" id="viewNavChart">
@@ -1563,14 +1594,14 @@ HTML_TEMPLATE = r"""<!doctype html>
         <div class="panel-head"><span>기초자산별 포지션 구조 (현물 + 선물 + 옵션)</span><span class="muted" id="nettingHint"></span></div>
         <div class="table-wrap" style="max-height:calc(100vh - 220px);">
           <table>
-            <thead><tr><th>기초자산</th><th>현물</th><th>선물 순</th><th>구성</th><th>순노출</th><th>%NAV</th><th>포지션 판정</th></tr></thead>
+            <thead><tr><th>기초자산</th><th>현물</th><th>선물 순</th><th>포지션 방향</th><th>순노출</th><th>%NAV</th><th>포지션 판정</th></tr></thead>
             <tbody id="nettingBody"></tbody>
           </table>
         </div>
       </section>
     </section>
 
-    <section class="grid-2 view view-hidden" id="viewPnl">
+    <section class="grid-even view view-hidden" id="viewPnl">
       <section class="panel">
         <div class="panel-head"><span>누적수익률 상위 Top 10</span><span class="muted">종목 단독 성과 · 주식</span></div>
         <div class="table-wrap" style="max-height:560px;">
@@ -1592,8 +1623,8 @@ HTML_TEMPLATE = r"""<!doctype html>
   <script>
     const DATA = __DATA_JSON__;
     const STORAGE_KEY = `blackon-dashboard:v2:${DATA.workbook}:${DATA.workbookModifiedAt}:${DATA.workbookSize}`;
-    const CHART_COLORS = { domestic: "#ff9500", overseas: "#c77b0f", domesticFut: "#8a5a12", overseasFut: "#5c4a2a", opt: "#e5484d", cash: "#3a3a3a" };
-    const CHART_TEXT = { domestic: "#0a0a0a", overseas: "#0a0a0a", domesticFut: "#ffffff", overseasFut: "#ffffff", opt: "#ffffff", cash: "#e8e6e1" };
+    const CHART_COLORS = { domestic: "#ff9500", overseas: "#c77b0f", domesticFut: "#8a5a12", overseasFut: "#5c4a2a", opt: "#e5484d", cash: "#3a3a3a", margin: "#6b5838" };
+    const CHART_TEXT = { domestic: "#0a0a0a", overseas: "#0a0a0a", domesticFut: "#ffffff", overseasFut: "#ffffff", opt: "#ffffff", cash: "#e8e6e1", margin: "#e8e6e1" };
     const TABS = ["domesticStock", "domesticFutures", "overseasStock", "overseasFutures", "options"];
     const TAB_LABEL = { domesticStock: "국내주식", domesticFutures: "국내선물", overseasStock: "해외주식", overseasFutures: "해외선물", options: "옵션" };
     const isFut = (t) => t === "domesticFutures" || t === "overseasFutures";
@@ -1974,27 +2005,20 @@ HTML_TEMPLATE = r"""<!doctype html>
     function renderMetrics() {
       const C = DATA.navChart, m = (C && C.metrics) || {};
       const pct = (v) => (v == null ? "-" : (v >= 0 ? "+" : "") + v.toFixed(2) + "%");
-      const cls = (el, v) => { el.className = "value" + (v == null ? "" : (v >= 0 ? " ret-pos" : " ret-neg")); };
       const set = (id, v, sub) => {
         const el = document.getElementById(id);
-        el.textContent = pct(v); cls(el, v);
+        el.textContent = pct(v);
+        el.className = "value" + (v == null ? "" : (v >= 0 ? " ret-pos" : " ret-neg"));
         document.getElementById(id + "Sub").textContent = sub || "";
       };
-      const noData = "기준가 이력 없음";
-      set("mAnnual", m.annual, C ? "설정 이후 · 원천 제공" : noData);
-      set("mMdd", m.mdd, C ? "설정 이후 · 수정기준가 기준" : noData);
-      set("mW1", m.w1, C ? (m.w1Ann != null ? `달력 7일 · 연환산 ${m.w1Ann.toFixed(1)}%` : "달력 7일") : noData);
-      set("mM1", m.m1, C ? (m.m1Ann != null ? `달력 30일 · 연환산 ${m.m1Ann.toFixed(1)}%` : "달력 30일") : noData);
-
-      const nav = DATA.nav || 1;
-      const pnl = DATA.totalPnl;
-      const pnlEl = document.getElementById("mPnl");
-      pnlEl.textContent = pnl == null ? "-" : formatEok(pnl);
-      pnlEl.className = "value" + (pnl == null ? "" : (pnl >= 0 ? " ret-pos" : " ret-neg"));
-      document.getElementById("mPnlSub").textContent =
-        (pnl == null ? "" : `NAV 대비 ${formatPct(pnl / nav)} · 주식·선물·옵션·현금성`);
-      const box = document.getElementById("mPnlBox");
-      if (box) box.title = "예금·증거금 제외, 현금성 ETF 포함";
+      const nd = "기준가 이력 없음";
+      const annSub = (raw, ann) => (ann != null ? `${raw} · 연환산 ${ann.toFixed(1)}%` : raw);
+      set("mAnnual", m.annual, C ? "설정 이후 · 원천 제공" : nd);
+      set("mW1", m.w1, C ? annSub("달력 7일", m.w1Ann) : nd);
+      set("mM1", m.m1, C ? annSub("달력 30일", m.m1Ann) : nd);
+      set("mM3", m.m3, C ? annSub("달력 91일", m.m3Ann) : nd);
+      set("mYtd", m.ytd, C ? "연초 대비 · 원천 제공" : nd);
+      set("mMdd", m.mdd, C ? "설정 이후 · 수정기준가 기준" : nd);
     }
 
     const SVGNS = "http://www.w3.org/2000/svg";
@@ -2003,7 +2027,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       for (const k in attrs) e.setAttribute(k, attrs[k]);
       return e;
     }
-    const PIE_SHADE = { domestic: ["#ffb347", "#e07d00"], overseas: ["#e0900f", "#9c5f08"], domesticFut: ["#a56a16", "#6e470d"], overseasFut: ["#75603a", "#463719"], opt: ["#ff5f63", "#c1373b"], cash: ["#4a4a4a", "#2b2b2b"] };
+    const PIE_SHADE = { domestic: ["#ffb347", "#e07d00"], overseas: ["#e0900f", "#9c5f08"], domesticFut: ["#a56a16", "#6e470d"], overseasFut: ["#75603a", "#463719"], opt: ["#ff5f63", "#c1373b"], cash: ["#4a4a4a", "#2b2b2b"], margin: ["#8a7550", "#52432c"] };
     // 드릴다운 팔레트: 개별종목=앰버 계열 / ETF=스틸블루 계열 (순서에 따라 명도 변화)
     function pieShadeFor(isEtf, i, n) {
       const t = n > 1 ? i / (n - 1) : 0;
@@ -2158,7 +2182,10 @@ HTML_TEMPLATE = r"""<!doctype html>
       const domVal = sum(activeList("domesticStock").map((r) => liveStock(r).value));
       const ovsVal = sum(activeList("overseasStock").map((r) => liveStock(r).value));
       const nav = DATA.nav || (domVal + ovsVal);
-      const cashVal = Math.max(0, nav - domVal - ovsVal);
+      const cashTotal = Math.max(0, nav - domVal - ovsVal);
+      // 현금 세그먼트에서 증거금(파생 담보)을 분리 표시
+      const marginVal = Math.max(0, DATA.marginValue || 0);
+      const cashVal = Math.max(0, cashTotal - marginVal);   // 순수 현금 + 현금성(증거금 제외)
       const domFutVal = sum(activeList("domesticFutures").map((r) => liveFut(r).valueAbs));
       const ovsFutVal = sum(activeList("overseasFutures").map((r) => liveFut(r).valueAbs));
       const optVal = sum(activeList("options").map((r) => liveOpt(r).valueAbs));
@@ -2168,7 +2195,8 @@ HTML_TEMPLATE = r"""<!doctype html>
         { key: "domesticFut", label: "국내선물 (노셔널)", val: domFutVal },
         { key: "overseasFut", label: "해외선물 (노셔널)", val: ovsFutVal },
         { key: "opt", label: "옵션 (프리미엄)", val: optVal },
-        { key: "cash", label: "현금·현금성·증거금", val: cashVal },
+        { key: "cash", label: "현금·현금성", val: cashVal },
+        { key: "margin", label: "증거금 (파생 담보)", val: marginVal },
       ];
       const total = sum(parts.map((p) => p.val)) || 1;   // 파이 비율 분모 = 그로스+현금
       const pieEl = document.getElementById("allocPie");
@@ -2250,7 +2278,8 @@ HTML_TEMPLATE = r"""<!doctype html>
       domesticFut: { tab: "domesticFutures", label: "국내선물" },
       overseasFut: { tab: "overseasFutures", label: "해외선물" },
       opt: { tab: "options", label: "옵션" },
-      cash: { tab: null, label: "현금·현금성·증거금" },
+      cash: { tab: null, label: "현금·현금성" },
+      margin: { tab: null, label: "증거금 (파생 담보)" },
     };
     function renderAllocDetail(nav) {
       const box = document.getElementById("allocDetail");
@@ -2263,39 +2292,47 @@ HTML_TEMPLATE = r"""<!doctype html>
       const closeBtn = '<button type="button" class="alloc-close" title="닫기">✕</button>';
       const kv = (k, v) => { const d = document.createElement("div"); d.className = "alloc-detail-row"; d.innerHTML = `<span class="k">${k}</span><span class="v">${v}</span>`; body.appendChild(d); };
 
+      const isMargin = (r) => (r.kind || "").includes("증거금");
+      const groupBlock = (title, rows, valFn, note) => {
+        if (!rows.length) return;
+        const h = document.createElement("div");
+        h.style.cssText = "margin-top:8px;padding:5px 8px;background:#0f0f0f;border-left:3px solid #ffa028;font-weight:700;color:#ffc46b;font-size:12px;border-radius:4px;display:flex;justify-content:space-between;";
+        h.innerHTML = `<span>${title}</span><span style="color:#ffc46b;font-weight:700;">${note || ""}</span>`;
+        body.appendChild(h);
+        const list = document.createElement("div"); list.className = "alloc-detail-list";
+        rows.slice().sort((a, b) => (valFn(b) || 0) - (valFn(a) || 0)).forEach((r) => {
+          const d = document.createElement("div"); d.className = "alloc-detail-row";
+          d.innerHTML = `<span class="k">${r.stockName} <span style="color:var(--muted);font-size:11px;">${r.kind}</span></span><span class="v">${formatEok(valFn(r))}</span>`;
+          list.appendChild(d);
+        });
+        body.appendChild(list);
+      };
+      const sumV = (arr, f) => arr.reduce((s, r) => s + (f(r) || 0), 0);
+
       if (key === "cash") {
-        // 3그룹: 현금(예금·예치금) / 현금성 자산(초단기채권 ETF) / 증거금(파생 담보)
-        const isMargin = (r) => (r.kind || "").includes("증거금");
+        // 현금(예금·예치금) + 현금성 자산(초단기채권 ETF) — 증거금은 별도 세그먼트
         const cashRows = DATA.cashOther.filter((r) => r.isDeposit && !r.isCashEtf && !isMargin(r));
         const cashEtfRows = DATA.cashOther.filter((r) => r.isCashEtf);
-        const marginRows = DATA.cashOther.filter((r) => isMargin(r));
-        const sumV = (arr, f) => arr.reduce((s, r) => s + (f(r) || 0), 0);
         const cashSum = sumV(cashRows, (r) => r.valueKrw);
         const etfSum = sumV(cashEtfRows, (r) => Math.abs(r.value || 0));
-        const mgnSum = sumV(marginRows, (r) => r.valueKrw);
-        const grand = cashSum + etfSum + mgnSum;
-        head.innerHTML = `<span>현금·현금성·증거금</span><span style="display:inline-flex;align-items:center;gap:8px;">${formatEok(grand)}${closeBtn}</span>`;
+        const grand = cashSum + etfSum;
+        head.innerHTML = `<span>현금·현금성</span><span style="display:inline-flex;align-items:center;gap:8px;">${formatEok(grand)}${closeBtn}</span>`;
         kv("현금 (예금·예치금)", `${formatEok(cashSum)} · ${formatPct(cashSum / nav)}`);
         kv("현금성 자산 (초단기채권 ETF)", `${formatEok(etfSum)} · ${formatPct(etfSum / nav)}`);
-        kv("증거금 (파생 담보)", `${formatEok(mgnSum)} · ${formatPct(mgnSum / nav)}`);
-
-        const groupBlock = (title, rows, valFn, note) => {
-          if (!rows.length) return;
-          const h = document.createElement("div");
-          h.style.cssText = "margin-top:8px;padding:5px 8px;background:#0f0f0f;border-left:3px solid #ffa028;font-weight:700;color:#ffc46b;font-size:12px;border-radius:4px;display:flex;justify-content:space-between;";
-          h.innerHTML = `<span>${title}</span><span style="color:#ffc46b;font-weight:700;">${note || ""}</span>`;
-          body.appendChild(h);
-          const list = document.createElement("div"); list.className = "alloc-detail-list";
-          rows.slice().sort((a, b) => (valFn(b) || 0) - (valFn(a) || 0)).forEach((r) => {
-            const d = document.createElement("div"); d.className = "alloc-detail-row";
-            d.innerHTML = `<span class="k">${r.stockName} <span style="color:var(--muted);font-size:11px;">${r.kind}</span></span><span class="v">${formatEok(valFn(r))}</span>`;
-            list.appendChild(d);
-          });
-          body.appendChild(list);
-        };
         groupBlock("현금", cashRows, (r) => r.valueKrw, `자유 인출 · ${formatEok(cashSum)}`);
         groupBlock("현금성 자산", cashEtfRows, (r) => Math.abs(r.value || 0), `초단기채권 ETF · ${formatEok(etfSum)}`);
-        groupBlock("증거금", marginRows, (r) => r.valueKrw, `파생 포지션 담보 · ${formatEok(mgnSum)}`);
+      } else if (key === "margin") {
+        // 증거금(파생 담보): 순수 현금에서 분리해 별도 표시
+        const marginRows = DATA.cashOther.filter((r) => isMargin(r));
+        const mgnSum = sumV(marginRows, (r) => r.valueKrw);
+        head.innerHTML = `<span>증거금 (파생 담보)</span><span style="display:inline-flex;align-items:center;gap:8px;">${formatEok(mgnSum)}${closeBtn}</span>`;
+        kv("증거금 합계", `${formatEok(mgnSum)} · ${formatPct(mgnSum / nav)}`);
+        kv("성격", "선물·옵션 유지증거금으로 묶인 현금");
+        groupBlock("증거금 내역", marginRows, (r) => r.valueKrw, `파생 포지션 담보 · ${formatEok(mgnSum)}`);
+        const note = document.createElement("div");
+        note.style.cssText = "margin-top:10px;padding:8px 10px;background:#1a1400;border:1px solid #3a2e10;border-radius:6px;color:#c9a86a;font-size:11.5px;line-height:1.5;";
+        note.textContent = "증거금은 파생 포지션 유지를 위해 예치된 현금으로, 자유 인출이 제한됩니다. 순수 현금과 분리해 표시합니다.";
+        body.appendChild(note);
       } else {
         const tab = cfg.tab;
         const rows = activeList(tab);
@@ -2386,24 +2423,37 @@ HTML_TEMPLATE = r"""<!doctype html>
       const nav = DATA.nav || 1;
       // U[key] = { name, spot, futLong, futShort, optBullPrem, optBearPrem, bullLegs[], bearLegs[] }
       const U = {};
-      const get = (key, name) => (U[key] = U[key] || { name, spot: 0, futLong: 0, futShort: 0, optBullPrem: 0, optBearPrem: 0, futBuyQty: 0, futSellQty: 0, optLegs: {} });
+      const get = (key, name) => (U[key] = U[key] || { name, spot: 0, futLong: 0, futShort: 0, optBullPrem: 0, optBearPrem: 0, futBuyQty: 0, futSellQty: 0, optLegs: {}, futKind: "", futName: "" });
 
       // ① 현물: 종목별 (개별주식선물 넷팅용)
+      const spotNames = [];
       activeList("domesticStock").forEach((r) => {
         const c = liveStock(r);
         get(r.stockName, r.stockName).spot += c.value;
+        if (!r.isEtf && c.value > 0) spotNames.push(r.stockName);
       });
+      // 개별주식선물 기초자산 → 현물 종목명 매칭 (종목명 형식이 달라도 포함관계로 연결)
+      const normNm = (x) => (x || "").replace(/\s+/g, "").toUpperCase();
+      const matchSpot = (under) => {
+        const u = normNm(under);
+        if (!u) return null;
+        let hit = spotNames.find((sp) => normNm(sp) === u);      // 정확 일치
+        if (hit) return hit;
+        hit = spotNames.find((sp) => u.includes(normNm(sp)) || normNm(sp).includes(u));   // 포함
+        return hit || null;
+      };
 
       // ② 국내선물
       activeList("domesticFutures").forEach((r) => {
         const c = liveFut(r);
         const kind = r.kind || "";
         let u;
-        if (kind === "개별주식선물") u = get(r.futUnder || r.stockName, r.futUnder || r.stockName);
+        if (kind === "개별주식선물") { const sp = matchSpot(r.futUnder || r.stockName); const nm = sp || r.futUnder || r.stockName; u = get(nm, nm); }
         else if (kind === "주가지수선물") { u = get("__K200__", "KOSPI200"); }
         else if (kind === "코스닥150선물") { u = get("__KQ150__", "KOSDAQ150"); }
         else if (kind === "통화선물") { u = get("__FX__", "USD/KRW (달러선물)"); }
         else u = get(kind, kind);
+        if (!u.futKind) { u.futKind = kind; u.futName = r.stockName || ""; }
         const fq = Math.abs(num(r.qty) || 0);
         if (c.direction === "매도") { u.futShort += c.valueAbs; u.futSellQty += fq; }
         else { u.futLong += c.valueAbs; u.futBuyQty += fq; }
@@ -2414,6 +2464,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         const c = liveFut(r);
         const root = ovsRoot(r.code) || cleanOvsName(r.stockName);
         const u = get("OVS:" + root, cleanOvsName(r.stockName));
+        if (!u.futKind) { u.futKind = r.kind || ""; u.futName = r.stockName || ""; }
         const fq = Math.abs(num(r.qty) || 0);
         if (c.direction === "매도") { u.futShort += c.valueAbs; u.futSellQty += fq; }
         else { u.futLong += c.valueAbs; u.futBuyQty += fq; }
@@ -2450,32 +2501,48 @@ HTML_TEMPLATE = r"""<!doctype html>
         td.style.cssText = "background:#000;color:#ffa028;font-weight:800;font-size:15px;letter-spacing:0.06em;padding:11px 14px;border-top:2px solid #ffa028;border-bottom:1px solid #3d3d3d;";
         tr.appendChild(td); return tr;
       };
-      const verdictOf = (spot, bullVal, bearVal) => {
-        const hasBull = spot > 0 || bullVal > 0;
-        const hasBear = bearVal > 0;
-        const net = spot + bullVal - bearVal;
-        const gross = Math.abs(spot) + bullVal + bearVal;
-        if (hasBull && !hasBear) return { v: "롱 베팅", c: "ret-pos", net };
-        if (hasBear && !hasBull) return { v: "숏 베팅", c: "ret-neg", net };
-        const tilt = gross ? net / gross : 0;
-        if (Math.abs(tilt) < 0.05) return { v: "헤지 · 중립", c: "gap-zero", net };
-        if (tilt > 0) return { v: `헤지 · 롱 우위 (${formatPct(tilt)})`, c: "ret-pos", net };
-        return { v: `헤지 · 숏 우위 (${formatPct(-tilt)})`, c: "ret-neg", net };
-      };
       const pushRow = (name, spot, futNetVal, pillsHtml, net, verdict) => {
         const tr = document.createElement("tr");
         tr.appendChild(cls(textTd(name), "col-name"));
         tr.appendChild(numTd(spot || null, "eok"));
         tr.appendChild(retTd(futNetVal, "eok"));
         const td = document.createElement("td");
-        td.style.whiteSpace = "normal"; td.style.maxWidth = "300px";
-        td.innerHTML = pillsHtml;
+        td.style.whiteSpace = "normal"; td.style.maxWidth = "320px";
+        td.innerHTML = pillsHtml;                 // 포지션 방향 (순매수/순매도/상쇄)
         tr.appendChild(td);
         tr.appendChild(retTd(net, "eok"));
         tr.appendChild(numTd(net / nav, "pct"));
-        const vt = textTd(verdict.v); vt.classList.add(verdict.c); vt.style.fontWeight = "700";
+        const vt = textTd(verdict ? verdict.v : ""); if (verdict && verdict.c) vt.classList.add(verdict.c); vt.style.fontWeight = "700";
         tr.appendChild(vt);
         body.appendChild(tr);
+      };
+
+      // --- 선물 포지션 판정 ---
+      // 규칙: 환매도=헷지 / 지수매도=헷지, 지수매수=롱베팅 / 원자재=방향성 / VIX=방향성 /
+      //       개별주식선물: 현물>0 헷지, 없으면 방향성.  종류(kind)는 백오피스가 이미 분류해 줌.
+      const INDEX_KINDS = ["주가지수선물", "코스닥150선물", "해외인덱스선물"];
+      const COMMO_KINDS = ["해외에너지선물", "해외기타금속선물", "해외농축산선물", "해외귀금속선물", "해외비철금속선물", "해외상품선물", "해외소프트선물", "해외축산선물", "해외곡물선물"];
+      const isVix = (u) => /VIX|변동성/i.test((u.futName || "") + (u.name || ""));
+      // 판정은 3가지로만: 롱 베팅 / 숏 베팅 / 포지션 헷지
+      const V_LONG = { v: "롱 베팅", c: "verdict-long" };
+      const V_SHORT = { v: "숏 베팅", c: "verdict-short" };
+      const V_HEDGE = { v: "포지션 헷지", c: "verdict-hedge" };
+      const futVerdict = (u) => {
+        const kind = u.futKind || "";
+        const net = u.futLong - u.futShort;
+        const dirShort = net < 0;
+        // 통화선물: 매도 = 헷지 (매수는 발생 안 함, 생기면 롱)
+        if (kind === "통화선물") return dirShort ? V_HEDGE : V_LONG;
+        // VIX: 인덱스로 분류되나 변동성 방향성 베팅
+        if (isVix(u)) return dirShort ? V_SHORT : V_LONG;
+        // 지수선물: 매도 = 헷지 / 매수 = 롱
+        if (INDEX_KINDS.indexOf(kind) >= 0) return dirShort ? V_HEDGE : V_LONG;
+        // 원자재: 방향성 베팅 (매수 롱 / 매도 숏)
+        if (COMMO_KINDS.indexOf(kind) >= 0) return dirShort ? V_SHORT : V_LONG;
+        // 개별주식선물: 현물 보유(spot>0) → 헷지 / 없으면 방향성
+        if (kind === "개별주식선물") return u.spot > 0 ? V_HEDGE : (dirShort ? V_SHORT : V_LONG);
+        // 그 외: 방향으로만
+        return dirShort ? V_SHORT : V_LONG;
       };
 
       // --- 선물 섹션 ---
@@ -2491,9 +2558,8 @@ HTML_TEMPLATE = r"""<!doctype html>
               : `<span class="opt-pill flat">선물 상쇄 ${detail}</span>`;
           } else if (u.futBuyQty) pill = `<span class="opt-pill up">▲ 선물매수 ${fmt(u.futBuyQty, "raw")}계약</span>`;
           else pill = `<span class="opt-pill down">▼ 선물매도 ${fmt(u.futSellQty, "raw")}계약</span>`;
-          const verdict = verdictOf(u.spot, Math.max(futNet, 0), Math.max(-futNet, 0));
           const domestic = !key.startsWith("OVS:");
-          return { name: u.name, domestic, spot: u.spot, futNet, pill, net: u.spot + futNet, verdict };
+          return { name: u.name, domestic, spot: u.spot, futNet, pill, net: u.spot + futNet, verdict: futVerdict(u) };
         })
         .sort((a, b) => (b.domestic - a.domestic) || (Math.abs(b.net) - Math.abs(a.net)));
       if (futRows.length) {
@@ -2528,10 +2594,11 @@ HTML_TEMPLATE = r"""<!doctype html>
         || a.under.localeCompare(b.under, "ko")
         || ((a.strike || 0) - (b.strike || 0)));
 
+      // 옵션 개별 판정: 순매도 = 프리미엄 수취 / 순매수는 방향(콜=롱, 풋=숏)
       const optVerdict = (cp, netQty) => {
-        if (netQty === 0) return "상쇄";
-        if (cp === "C") return netQty > 0 ? "상승 베팅" : "프리미엄 수취 (상승 제한)";
-        return netQty > 0 ? "하락 방어·베팅" : "프리미엄 수취 (하락 감수)";
+        if (netQty === 0) return { v: "상쇄", c: "muted" };
+        if (netQty < 0) return { v: "프리미엄 수취", c: "verdict-prem" };   // 콜·풋 매도 공통
+        return (cp === "C") ? { v: "롱 베팅", c: "verdict-long" } : { v: "숏 베팅", c: "verdict-short" };
       };
 
       if (optLegRows.length) {
@@ -2613,7 +2680,8 @@ HTML_TEMPLATE = r"""<!doctype html>
           tr.appendChild(posTd);
           tr.appendChild(cls(textTd(L.expiry || ""), "number"));
           tr.appendChild(numTd(L.netPrem, "eok"));
-          const vt = textTd(optVerdict(L.cp, L.netQty)); vt.style.fontWeight = "600";
+          const _ov = optVerdict(L.cp, L.netQty);
+          const vt = textTd(_ov.v); if (_ov.c) vt.classList.add(_ov.c);
           tr.appendChild(vt);
           body.appendChild(tr);
           // 국내 옵션의 마지막 레그 직후 종합판정 행 삽입
